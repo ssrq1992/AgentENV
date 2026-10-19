@@ -46,6 +46,8 @@ pub struct SandboxSnapshotManifest {
     /// Number of reserved virtio-block slots available for launch-time volumes.
     #[serde(default)]
     pub volume_drive_slots: usize,
+    #[serde(default)]
+    pub volume_readonly_slots: usize,
     /// Number of attached drives represented by IDs in the Firecracker snapshot.
     /// Launch-time volumes use the reserved slots that follow these drives.
     #[serde(default)]
@@ -127,6 +129,7 @@ impl SandboxSnapshotManifest {
             },
             attached_drives: Vec::new(),
             volume_drive_slots: 0,
+            volume_readonly_slots: 0,
             physical_extra_drive_count: attached_drives.len(),
             memory_startup_pack: None,
         }
@@ -259,6 +262,7 @@ mod tests {
             },
             attached_drives: vec![known],
             volume_drive_slots: 0,
+            volume_readonly_slots: 0,
             physical_extra_drive_count: 1,
             memory_startup_pack: None,
         };

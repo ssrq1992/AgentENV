@@ -1,0 +1,48 @@
+%%{init:{"theme":"base","themeVariables":{"background":"#0f1822","primaryColor":"#24364a","primaryTextColor":"#c4d0dc","primaryBorderColor":"#617d9b","lineColor":"#8999aa","fontFamily":"PingFang SC, sans-serif"}}}%%
+flowchart TB
+ subgraph K["K：Kubernetes 原生卷管理"]
+  PV["StorageClass / PVC / PV"]
+  PC["PV Controller + CSI 官方 sidecars"]
+  CD["D：厂商 CSI Controller / Identity"]
+  PV -.-> PC
+  PC -->|"Create / Delete / Expand"| CD
+ end
+ subgraph A["A：agentenvadapter control 进程"]
+  API["mTLS API / 幂等 / 租户授权"]
+  P["事务 Placement / 模板 catalog"]
+  C["N：SSF Consumption<br/>Resolver / WFFC / Acquire / Attach / Plan"]
+  API --> P --> C
+ end
+ DB[("共享 PostgreSQL<br/>SSF 消费权 + 独立 adapter 元数据")]
+ G["N：SSF Guard 独立 Pod"]
+ GW["N：条件 Gateway<br/>仅消费 RPC"]
+ subgraph W["Worker 上的直接执行"]
+  N["A：节点 sidecar<br/>intent / bbolt / Prepare / Runtime / Evidence"]
+  SN["N：SSF Node<br/>Stage / Publish / shared refs / WAL"]
+  DN["D：厂商 CSI Node / Identity"]
+  AE["P+E：AgentENV 通用 Provider<br/>设备槽位 / 实例日志 / 生命周期限制"]
+  VM["P：Firecracker → guest<br/>块设备 / UUID / ext4 / readonly 检查"]
+ end
+ B[("B：实际存储后端")]
+ PV -.-> C
+ C --> DB
+ G -.-> DB
+ C -->|"Attach / Detach"| GW --> CD
+ C -->|"完整签名计划，mTLS"| N
+ N -->|"Prepare / Ready / Release"| SN
+ SN -->|"UDS NodeStage / NodePublish"| DN
+ N -->|"受保护 ticket"| AE
+ AE -->|"loopback prepare / durable events"| N
+ SN -->|"HTTPS EvidenceVerifier"| N
+ AE --> VM
+ DN --> B
+ VM ==>|"业务块 I/O，不经过 control"| B
+ classDef common fill:#244351,stroke:#739bad,color:#c8dee6;
+ classDef native fill:#24364a,stroke:#617d9b,color:#c3d0dd;
+ classDef custom fill:#44392c,stroke:#aa9066,color:#dfcfb2;
+ classDef backend fill:#253a33,stroke:#668b7d,color:#b4cfc3;
+ class C,G,GW,SN common;
+ class PC,PV native;
+ class API,P,N,AE,VM,CD,DN custom;
+ class DB,B backend;
+ style GW stroke-dasharray:7 5

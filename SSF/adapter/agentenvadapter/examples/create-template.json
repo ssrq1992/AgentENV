@@ -1,0 +1,1 @@
+{"request_id":"template-example-1","kind":"template","launch":{"templateID":"REPLACE_WITH_IMMUTABLE_SNAPSHOT_ID","timeout":600},"mounts":[{"namespace":"agentenv-demo","pvc":"data","id":"data","path":"/data","readonly":false}]}

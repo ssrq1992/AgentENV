@@ -1,0 +1,23 @@
+{
+ "environment": {"host_kernel":"", "kubernetes":"", "node_uid":"", "boot_id":"", "agentenv_commit":"", "patched_source_sha256":"", "image_digests":{}, "driver":"", "driver_kind":"test-fixture or vendor"},
+ "checks": {
+   "rust_compile_and_legacy_regression":"NOT RUN",
+   "postgres_concurrency_and_compensation":"NOT RUN",
+   "k8s_static_prebound":"NOT RUN",
+   "k8s_immediate":"NOT RUN",
+   "k8s_wffc_dynamic":"NOT RUN",
+   "k8s_wffc_static":"NOT RUN",
+   "topology_and_pvc_uid_recreation":"NOT RUN",
+   "guard_drain_delete":"NOT RUN",
+   "cold_rw_ro":"NOT RUN",
+   "template_rw_ro":"NOT RUN",
+   "pvc_retained_rebuild":"NOT RUN",
+   "cancel_late_start":"NOT RUN",
+   "lost_stop_notification":"NOT RUN",
+   "control_node_agentenv_ssf_restarts":"NOT RUN",
+   "node_boot_or_pid_namespace_change":"NOT RUN",
+   "last_holder_and_orphan_scan":"NOT RUN",
+   "performance_cold_template_concurrent":"NOT RUN"
+ },
+ "evidence":[],"limitations":[],"approved_for_production":false
+}

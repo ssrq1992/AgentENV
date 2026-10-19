@@ -1,0 +1,110 @@
+{
+  "date": "2026-10-19",
+  "host": "macOS-13.7.8-x86_64-i386-64bit-Mach-O",
+  "status": "IMPLEMENTED; REAL VM ACCEPTANCE NOT RUN",
+  "checks": {
+    "go-test.jsonl": {
+      "status": "PASS",
+      "passed": 36,
+      "skipped": 8,
+      "adapter_passed": 18,
+      "adapter_skipped": 4,
+      "skipped_tests": [
+        "TestPostgresAbortUnattachedPartialAcquire",
+        "TestPostgresConcurrentWriterAndDrain",
+        "TestPostgresConsumptionLifecycle",
+        "TestClusterNativeProvisioning",
+        "TestPostgresConcurrentIdempotency",
+        "TestPostgresStopCannotBeOverwritten",
+        "TestPostgresInitializationIsSingleOperation",
+        "TestPostgresConcurrentPlacementCapacity"
+      ]
+    },
+    "go-race.jsonl": {
+      "status": "PASS",
+      "passed": 36,
+      "skipped": 8,
+      "adapter_passed": 18,
+      "adapter_skipped": 4,
+      "skipped_tests": [
+        "TestPostgresAbortUnattachedPartialAcquire",
+        "TestPostgresConsumptionLifecycle",
+        "TestPostgresConcurrentWriterAndDrain",
+        "TestClusterNativeProvisioning",
+        "TestPostgresConcurrentIdempotency",
+        "TestPostgresStopCannotBeOverwritten",
+        "TestPostgresInitializationIsSingleOperation",
+        "TestPostgresConcurrentPlacementCapacity"
+      ]
+    },
+    "go_vet": {
+      "status": "PASS",
+      "log": "go-vet.txt"
+    },
+    "linux_amd64_cross_build": {
+      "status": "PASS",
+      "log": "linux-build.txt",
+      "execution": false
+    },
+    "protobuf_generation": {
+      "status": "PASS",
+      "log": "protobuf.txt"
+    },
+    "patch_replay": {
+      "status": "PASS",
+      "manifest": "../patches/manifest.json"
+    },
+    "rust_syntax": {
+      "status": "PASS relative to baseline",
+      "log": "rust-syntax.json",
+      "type_check": false
+    },
+    "rendered_kubernetes_objects": {
+      "status": "PASS typed decode + reproducibility",
+      "objects": 21,
+      "api_server_validation": false
+    },
+    "dev_pki_generation": {
+      "status": "PASS",
+      "private_keys": "temporary directory only; not included"
+    },
+    "artifacts": {
+      "status": "PASS",
+      "errors": [],
+      "checks": [
+        "relative Markdown links",
+        "core dependency boundary",
+        "protected CSI document SHA256",
+        "JSON parsing",
+        "bash syntax"
+      ]
+    },
+    "diagram_exports": {
+      "status": "PASS",
+      "formats": [
+        "Mermaid source",
+        "SVG",
+        "PNG"
+      ],
+      "visual_inspection": "Both full PNG exports inspected; readable labels, no clipping"
+    }
+  },
+  "unavailable_tools": [
+    "cargo",
+    "rustc",
+    "docker",
+    "kubectl",
+    "kind"
+  ],
+  "not_run": [
+    "Rust cargo check/test and AgentENV disabled-extension regression",
+    "PostgreSQL transaction and partial-acquire compensation tests",
+    "Kubernetes API-server Guard/UID/topology/static/Immediate/WFFC/reclaim tests",
+    "Linux actual mount/device/PIDfd tests",
+    "real Firecracker cold/template read/write/readonly tests",
+    "real process and node failure/recovery matrix",
+    "real VM p50/p95/p99 performance",
+    "vendor CSI driver validation"
+  ],
+  "source_digest": "d48759a6f15047177b519f4a97420e0b593425f887979f09ffe378f7ff91f5fb"
+}

@@ -1,0 +1,10 @@
+{
+  "listen": ":9444", "health_listen": ":9091", "hook_listen": "127.0.0.1:9445",
+  "cert": "/tls/tls.crt", "key": "/tls/tls.key", "ca": "/tls/ca.crt",
+  "plan_public_key": "/signing/plan.pub", "node_name": "worker-1",
+  "ssf_endpoint": "ssf-aenv-worker-1.agentenv-ssf.svc:9443",
+  "agent_url": "http://127.0.0.1:8000", "agent_key_file": "/native-key/AENV_API_KEY",
+  "control_peers": ["spiffe://ssf/agentenv/control"],
+  "evidence_peers": ["spiffe://ssf/agentenv/ssf-node/worker-1"],
+  "root": "/var/lib/agentenvadapter", "device_root": "/var/lib/ssf", "runtime_root": "/var/lib/agentenv-external"
+}

@@ -1,0 +1,11 @@
+# Added configuration only. AgentENV supplies defaults for omitted values.
+# Template-building nodes use the same volume settings but storage_required=false.
+[custom_extension]
+url = "http://127.0.0.1:9445"
+timeout_ms = 5000
+storage_required = true
+storage_state_dir = "/var/lib/agentenv-external"
+storage_device_root = "/var/lib/ssf"
+storage_readonly_slots = 2
+[volume]
+max_volume_count = 8

@@ -1,0 +1,54 @@
+{
+  "parser": "tree-sitter 0.25.2 / rust 0.24.0",
+  "type_check": false,
+  "status": "PASS compared with baseline",
+  "files": {
+    "src/cfg.rs": {
+      "errors": [
+        {
+          "text": "&raw",
+          "line": 1427,
+          "type": "ERROR"
+        }
+      ],
+      "baseline_errors": [
+        {
+          "text": "&raw",
+          "line": 1416,
+          "type": "ERROR"
+        }
+      ],
+      "new_errors": false
+    },
+    "src/orchestrator/service.rs": {
+      "errors": [],
+      "baseline_errors": [],
+      "new_errors": false
+    },
+    "src/sandbox/custom_extension/mod.rs": {
+      "errors": [],
+      "baseline_errors": [],
+      "new_errors": false
+    },
+    "src/sandbox/custom_extension/storage.rs": {
+      "errors": [],
+      "baseline_errors": [],
+      "new_errors": false
+    },
+    "src/sandbox/firecracker/config.rs": {
+      "errors": [],
+      "baseline_errors": [],
+      "new_errors": false
+    },
+    "src/sandbox/firecracker/sandbox.rs": {
+      "errors": [],
+      "baseline_errors": [],
+      "new_errors": false
+    },
+    "src/sandbox/manifest.rs": {
+      "errors": [],
+      "baseline_errors": [],
+      "new_errors": false
+    }
+  }
+}

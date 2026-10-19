@@ -1,0 +1,910 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "agentenv-ssf"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "agentenv-demo"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "agentenv-control",
+        "namespace": "agentenv-ssf"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "agentenv-node",
+        "namespace": "agentenv-ssf"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "ssf-node",
+        "namespace": "agentenv-ssf"
+      }
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "name": "agentenv-ssf-agentenv-control"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "ssf-consumption"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "agentenv-control",
+          "namespace": "agentenv-ssf"
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "name": "agentenv-ssf-ssf-node"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "ssf-node"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "ssf-node",
+          "namespace": "agentenv-ssf"
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "name": "agentenv-ssf-agentenv-node"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "agentenv-node-read"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "agentenv-node",
+          "namespace": "agentenv-ssf"
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "agentenv-node-read"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "nodes"
+          ],
+          "verbs": [
+            "get"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "agentenv-native",
+        "namespace": "agentenv-ssf"
+      },
+      "data": {
+        "agentenv.toml": "# Added configuration only. AgentENV supplies defaults for omitted values.\n# Template-building nodes use the same volume settings but storage_required=false.\n[custom_extension]\nurl = \"http://127.0.0.1:9445\"\ntimeout_ms = 5000\nstorage_required = true\nstorage_state_dir = \"/var/lib/agentenv-external\"\nstorage_device_root = \"/var/lib/ssf\"\nstorage_readonly_slots = 2\n[volume]\nmax_volume_count = 8\n"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "aenv-worker-1",
+        "namespace": "agentenv-ssf"
+      },
+      "data": {
+        "config.json": "{\"listen\": \":9444\", \"health_listen\": \":9091\", \"hook_listen\": \"127.0.0.1:9445\", \"cert\": \"/tls/tls.crt\", \"key\": \"/tls/tls.key\", \"ca\": \"/tls/ca.crt\", \"plan_public_key\": \"/signing/plan.pub\", \"node_name\": \"worker-1\", \"ssf_endpoint\": \"ssf-aenv-worker-1.agentenv-ssf.svc:9443\", \"agent_url\": \"http://127.0.0.1:8000\", \"agent_key_file\": \"/native-key/AENV_API_KEY\", \"control_peers\": [\"spiffe://ssf/agentenv/control\"], \"evidence_peers\": [\"spiffe://ssf/agentenv/ssf-node/worker-1\"], \"root\": \"/var/lib/agentenvadapter\", \"device_root\": \"/var/lib/ssf\", \"runtime_root\": \"/var/lib/agentenv-external\"}"
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "metadata": {
+        "name": "aenv-worker-1",
+        "namespace": "agentenv-ssf"
+      },
+      "spec": {
+        "selector": {
+          "matchLabels": {
+            "app": "aenv-worker-1"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "aenv-worker-1",
+              "agentenv.ssf.dev/role": "agentenv-node"
+            }
+          },
+          "spec": {
+            "serviceAccountName": "agentenv-node",
+            "containers": [
+              {
+                "name": "agentenv",
+                "image": "agentenv-ssf:0.2.3",
+                "securityContext": {
+                  "privileged": true
+                },
+                "env": [
+                  {
+                    "name": "API_ADDR",
+                    "value": "127.0.0.1:8000"
+                  },
+                  {
+                    "name": "AENV_CONFIG_PATH",
+                    "value": "/config/agentenv.toml"
+                  },
+                  {
+                    "name": "AENV_CUSTOM_EXTENSION_URL",
+                    "value": "http://127.0.0.1:9445"
+                  },
+                  {
+                    "name": "AENV_EXTERNAL_STORAGE_REQUIRED",
+                    "value": "true"
+                  },
+                  {
+                    "name": "AENV_OBSERVABILITY_SCHEDULER_REPORT_ENABLED",
+                    "value": "false"
+                  },
+                  {
+                    "name": "AENV_API_KEY",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agentenv-native-key",
+                        "key": "AENV_API_KEY"
+                      }
+                    }
+                  }
+                ],
+                "volumeMounts": [
+                  {
+                    "name": "workspace",
+                    "mountPath": "/workspace"
+                  },
+                  {
+                    "name": "native-config",
+                    "mountPath": "/config",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "runtime",
+                    "mountPath": "/var/lib/agentenv-external"
+                  },
+                  {
+                    "name": "state",
+                    "mountPath": "/var/lib/ssf",
+                    "mountPropagation": "HostToContainer"
+                  },
+                  {
+                    "name": "dev",
+                    "mountPath": "/dev"
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "8",
+                    "memory": "8192Mi"
+                  }
+                },
+                "startupProbe": {
+                  "exec": {
+                    "command": [
+                      "curl",
+                      "-fsS",
+                      "http://127.0.0.1:8000/health"
+                    ]
+                  },
+                  "periodSeconds": 5,
+                  "failureThreshold": 120
+                }
+              },
+              {
+                "name": "adapter",
+                "image": "agentenvadapter:0.1.0",
+                "args": [
+                  "node",
+                  "-config",
+                  "/config/config.json"
+                ],
+                "ports": [
+                  {
+                    "containerPort": 9444
+                  },
+                  {
+                    "containerPort": 9091
+                  }
+                ],
+                "volumeMounts": [
+                  {
+                    "name": "config",
+                    "mountPath": "/config",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "tls",
+                    "mountPath": "/tls",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "signing",
+                    "mountPath": "/signing",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "wal",
+                    "mountPath": "/var/lib/agentenvadapter"
+                  },
+                  {
+                    "name": "runtime",
+                    "mountPath": "/var/lib/agentenv-external"
+                  },
+                  {
+                    "name": "state",
+                    "mountPath": "/var/lib/ssf",
+                    "mountPropagation": "HostToContainer"
+                  },
+                  {
+                    "name": "native-key",
+                    "mountPath": "/native-key",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "dev",
+                    "mountPath": "/dev"
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/readyz",
+                    "port": 9091
+                  },
+                  "periodSeconds": 5,
+                  "timeoutSeconds": 3
+                },
+                "livenessProbe": {
+                  "httpGet": {
+                    "path": "/livez",
+                    "port": 9091
+                  }
+                },
+                "resources": {
+                  "requests": {
+                    "cpu": "100m",
+                    "memory": "128Mi"
+                  },
+                  "limits": {
+                    "memory": "512Mi"
+                  }
+                },
+                "securityContext": {
+                  "privileged": true,
+                  "runAsUser": 0
+                }
+              }
+            ],
+            "volumes": [
+              {
+                "name": "config",
+                "configMap": {
+                  "name": "aenv-worker-1"
+                }
+              },
+              {
+                "name": "native-config",
+                "configMap": {
+                  "name": "agentenv-native"
+                }
+              },
+              {
+                "name": "tls",
+                "secret": {
+                  "secretName": "aenv-worker-1-tls"
+                }
+              },
+              {
+                "name": "signing",
+                "secret": {
+                  "secretName": "agentenv-plan-public"
+                }
+              },
+              {
+                "name": "native-key",
+                "secret": {
+                  "secretName": "agentenv-native-key"
+                }
+              },
+              {
+                "name": "wal",
+                "hostPath": {
+                  "path": "/var/lib/agentenvadapter",
+                  "type": "DirectoryOrCreate"
+                }
+              },
+              {
+                "name": "runtime",
+                "hostPath": {
+                  "path": "/var/lib/agentenv-external",
+                  "type": "DirectoryOrCreate"
+                }
+              },
+              {
+                "name": "state",
+                "hostPath": {
+                  "path": "/var/lib/ssf",
+                  "type": "DirectoryOrCreate"
+                }
+              },
+              {
+                "name": "workspace",
+                "hostPath": {
+                  "path": "/var/lib/aenv",
+                  "type": "DirectoryOrCreate"
+                }
+              },
+              {
+                "name": "dev",
+                "hostPath": {
+                  "path": "/dev",
+                  "type": "DirectoryOrCreate"
+                }
+              }
+            ],
+            "shareProcessNamespace": true,
+            "affinity": {
+              "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                  "nodeSelectorTerms": [
+                    {
+                      "matchFields": [
+                        {
+                          "key": "metadata.name",
+                          "operator": "In",
+                          "values": [
+                            "worker-1"
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            },
+            "terminationGracePeriodSeconds": 120
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "aenv-worker-1",
+        "namespace": "agentenv-ssf"
+      },
+      "spec": {
+        "selector": {
+          "app": "aenv-worker-1"
+        },
+        "ports": [
+          {
+            "name": "tls",
+            "port": 9444,
+            "targetPort": 9444
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "ssf-aenv-worker-1",
+        "namespace": "agentenv-ssf"
+      },
+      "data": {
+        "config.json": "{\"Listen\": \":9443\", \"HealthListen\": \":9090\", \"Root\": \"/var/lib/ssf\", \"NodeName\": \"worker-1\", \"PlanPublicKey\": \"/signing/plan.pub\", \"Cert\": \"/tls/tls.crt\", \"Key\": \"/tls/tls.key\", \"CA\": \"/tls/ca.crt\", \"AllowedPeers\": [\"spiffe://ssf/agentenv/node/worker-1\"], \"EvidenceEndpoint\": \"https://aenv-worker-1.agentenv-ssf.svc:9444/v1/evidence\", \"Drivers\": [{\"Name\": \"test.block.ssf.dev\", \"NodeEndpoint\": \"unix:///var/lib/kubelet/plugins/test.block.ssf.dev/csi.sock\", \"Revision\": \"1\"}]}"
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "metadata": {
+        "name": "ssf-aenv-worker-1",
+        "namespace": "agentenv-ssf"
+      },
+      "spec": {
+        "selector": {
+          "matchLabels": {
+            "app": "ssf-aenv-worker-1"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "ssf-aenv-worker-1",
+              "agentenv.ssf.dev/role": "ssf-node"
+            }
+          },
+          "spec": {
+            "serviceAccountName": "ssf-node",
+            "containers": [
+              {
+                "name": "ssf-node",
+                "image": "ssf:0.1.0",
+                "command": [
+                  "ssf-node"
+                ],
+                "args": [
+                  "-config",
+                  "/config/config.json"
+                ],
+                "securityContext": {
+                  "privileged": true
+                },
+                "ports": [
+                  {
+                    "containerPort": 9443
+                  },
+                  {
+                    "containerPort": 9090
+                  }
+                ],
+                "livenessProbe": {
+                  "httpGet": {
+                    "path": "/livez",
+                    "port": 9090
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "config",
+                    "mountPath": "/config",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "tls",
+                    "mountPath": "/tls",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "signing",
+                    "mountPath": "/signing",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "state",
+                    "mountPath": "/var/lib/ssf",
+                    "mountPropagation": "Bidirectional"
+                  },
+                  {
+                    "name": "plugins",
+                    "mountPath": "/var/lib/kubelet/plugins",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "dev",
+                    "mountPath": "/dev"
+                  }
+                ]
+              }
+            ],
+            "volumes": [
+              {
+                "name": "config",
+                "configMap": {
+                  "name": "ssf-aenv-worker-1"
+                }
+              },
+              {
+                "name": "tls",
+                "secret": {
+                  "secretName": "ssf-aenv-worker-1-tls"
+                }
+              },
+              {
+                "name": "signing",
+                "secret": {
+                  "secretName": "agentenv-plan-public"
+                }
+              },
+              {
+                "name": "state",
+                "hostPath": {
+                  "path": "/var/lib/ssf",
+                  "type": "DirectoryOrCreate"
+                }
+              },
+              {
+                "name": "plugins",
+                "hostPath": {
+                  "path": "/var/lib/kubelet/plugins",
+                  "type": "DirectoryOrCreate"
+                }
+              },
+              {
+                "name": "dev",
+                "hostPath": {
+                  "path": "/dev",
+                  "type": "DirectoryOrCreate"
+                }
+              }
+            ],
+            "affinity": {
+              "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                  "nodeSelectorTerms": [
+                    {
+                      "matchFields": [
+                        {
+                          "key": "metadata.name",
+                          "operator": "In",
+                          "values": [
+                            "worker-1"
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "ssf-aenv-worker-1",
+        "namespace": "agentenv-ssf"
+      },
+      "spec": {
+        "selector": {
+          "app": "ssf-aenv-worker-1"
+        },
+        "ports": [
+          {
+            "name": "tls",
+            "port": 9443,
+            "targetPort": 9443
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "agentenv-control",
+        "namespace": "agentenv-ssf"
+      },
+      "data": {
+        "config.json": "{\"listen\": \":9444\", \"health_listen\": \":9091\", \"cert\": \"/tls/tls.crt\", \"key\": \"/tls/tls.key\", \"ca\": \"/tls/ca.crt\", \"signing_key\": \"/signing/plan.key\", \"principals\": {\"spiffe://ssf/agentenv/user/demo\": {\"tenant\": \"demo\", \"namespaces\": [\"agentenv-demo\"]}}, \"workers\": [{\"name\": \"worker-1\", \"url\": \"https://aenv-worker-1.agentenv-ssf.svc:9444\", \"capacity\": {\"cpu\": 8, \"memory_mib\": 8192}}], \"drivers\": [{\"Name\": \"test.block.ssf.dev\", \"ControllerEndpoint\": \"ssf-gateway.ssf-fixture.svc:9443\", \"Revision\": \"1\"}], \"templates\": {}}"
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "agentenv-control",
+        "namespace": "agentenv-ssf"
+      },
+      "spec": {
+        "selector": {
+          "matchLabels": {
+            "app": "agentenv-control"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "agentenv-control",
+              "agentenv.ssf.dev/role": "agentenv-control"
+            }
+          },
+          "spec": {
+            "serviceAccountName": "agentenv-control",
+            "containers": [
+              {
+                "name": "control",
+                "image": "agentenvadapter:0.1.0",
+                "args": [
+                  "control",
+                  "-config",
+                  "/config/config.json"
+                ],
+                "ports": [
+                  {
+                    "containerPort": 9444
+                  },
+                  {
+                    "containerPort": 9091
+                  }
+                ],
+                "volumeMounts": [
+                  {
+                    "name": "config",
+                    "mountPath": "/config",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "tls",
+                    "mountPath": "/tls",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "signing",
+                    "mountPath": "/signing",
+                    "readOnly": true
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/readyz",
+                    "port": 9091
+                  },
+                  "periodSeconds": 5,
+                  "timeoutSeconds": 3
+                },
+                "livenessProbe": {
+                  "httpGet": {
+                    "path": "/livez",
+                    "port": 9091
+                  }
+                },
+                "resources": {
+                  "requests": {
+                    "cpu": "100m",
+                    "memory": "128Mi"
+                  },
+                  "limits": {
+                    "memory": "512Mi"
+                  }
+                },
+                "env": [
+                  {
+                    "name": "SSF_DATABASE_URL",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agentenv-ledger",
+                        "key": "url"
+                      }
+                    }
+                  }
+                ],
+                "securityContext": {
+                  "runAsUser": 65532,
+                  "runAsNonRoot": true,
+                  "allowPrivilegeEscalation": false,
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ],
+            "volumes": [
+              {
+                "name": "config",
+                "configMap": {
+                  "name": "agentenv-control"
+                }
+              },
+              {
+                "name": "tls",
+                "secret": {
+                  "secretName": "agentenv-control-tls"
+                }
+              },
+              {
+                "name": "signing",
+                "secret": {
+                  "secretName": "agentenv-plan-private"
+                }
+              }
+            ]
+          }
+        },
+        "replicas": 2
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "agentenv-control",
+        "namespace": "agentenv-ssf"
+      },
+      "spec": {
+        "selector": {
+          "app": "agentenv-control"
+        },
+        "ports": [
+          {
+            "name": "tls",
+            "port": 9444,
+            "targetPort": 9444
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "batch/v1",
+      "kind": "Job",
+      "metadata": {
+        "name": "agentenv-migrate",
+        "namespace": "agentenv-ssf"
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "serviceAccountName": "agentenv-control",
+            "restartPolicy": "OnFailure",
+            "containers": [
+              {
+                "name": "migrate",
+                "image": "agentenvadapter:0.1.0",
+                "args": [
+                  "ctl",
+                  "-config",
+                  "/config/config.json",
+                  "-action",
+                  "migrate"
+                ],
+                "volumeMounts": [
+                  {
+                    "name": "config",
+                    "mountPath": "/config",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "tls",
+                    "mountPath": "/tls",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "signing",
+                    "mountPath": "/signing",
+                    "readOnly": true
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "100m",
+                    "memory": "128Mi"
+                  },
+                  "limits": {
+                    "memory": "512Mi"
+                  }
+                },
+                "env": [
+                  {
+                    "name": "SSF_DATABASE_URL",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "agentenv-ledger",
+                        "key": "url"
+                      }
+                    }
+                  }
+                ],
+                "securityContext": {
+                  "runAsUser": 65532,
+                  "runAsNonRoot": true,
+                  "allowPrivilegeEscalation": false,
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ],
+            "volumes": [
+              {
+                "name": "config",
+                "configMap": {
+                  "name": "agentenv-control"
+                }
+              },
+              {
+                "name": "tls",
+                "secret": {
+                  "secretName": "agentenv-control-tls"
+                }
+              },
+              {
+                "name": "signing",
+                "secret": {
+                  "secretName": "agentenv-plan-private"
+                }
+              }
+            ]
+          }
+        },
+        "backoffLimit": 3
+      }
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "metadata": {
+        "name": "agentenv-workers",
+        "namespace": "agentenv-ssf"
+      },
+      "spec": {
+        "podSelector": {
+          "matchLabels": {
+            "agentenv.ssf.dev/role": "agentenv-node"
+          }
+        },
+        "policyTypes": [
+          "Ingress"
+        ],
+        "ingress": [
+          {
+            "from": [
+              {
+                "podSelector": {
+                  "matchLabels": {
+                    "agentenv.ssf.dev/role": "agentenv-control"
+                  }
+                }
+              },
+              {
+                "podSelector": {
+                  "matchLabels": {
+                    "agentenv.ssf.dev/role": "ssf-node"
+                  }
+                }
+              }
+            ],
+            "ports": [
+              {
+                "protocol": "TCP",
+                "port": 9444
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

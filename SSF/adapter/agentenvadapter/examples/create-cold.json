@@ -1,0 +1,1 @@
+{"request_id":"cold-example-1","kind":"cold","launch":{"image":"ubuntu:24.04","cpuCount":2,"memoryMB":512,"timeout":600},"mounts":[{"namespace":"agentenv-demo","pvc":"data","id":"data","path":"/data","readonly":false}]}

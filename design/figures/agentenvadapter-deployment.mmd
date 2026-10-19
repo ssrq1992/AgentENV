@@ -1,0 +1,42 @@
+%%{init:{"theme":"base","themeVariables":{"background":"#0f1822","primaryColor":"#24364a","primaryTextColor":"#c4d0dc","lineColor":"#8999aa","fontFamily":"PingFang SC, sans-serif"}}}%%
+flowchart TB
+ subgraph K["集群控制资源 / 管理 Pod"]
+  API["K：API Server / StorageClass / PVC / PV / CSINode"]
+  PV["K：kube-controller-manager Pod<br/>PV Controller / binder"]
+  CSI["CSI Controller Pod<br/>K：external-provisioner / attacher / resizer / snapshotter（按需）<br/>D：厂商 Controller + Identity<br/>N：Gateway（条件 sidecar，mTLS 到 UDS）"]
+  GU["SSF Guard Deployment / Pod<br/>N：Admission / 许可 / 排空校验"]
+ end
+ subgraph CTRL["适配控制服务（不必运行在 control-plane Node）"]
+  CT["agentenv-control Deployment / Pod<br/>A：mTLS API / 元数据 / 事务 Placement / 恢复<br/>N：嵌入式 Consumption / CSI Client"]
+  DB[("外部持久 PostgreSQL<br/>ssf_* 权威消费账本<br/>agentenv_adapter_* 项目元数据")]
+ end
+ subgraph NODE["专用 Worker：每 Worker 固定服务地址"]
+  subgraph POD["aenv-worker DaemonSet Pod；共享 PID namespace"]
+   A["A：adapter node 容器 / 进程<br/>bbolt / Runtime / Evidence / ext4 初始化<br/>HTTPS :9444；Hook loopback :9445"]
+   P["P：AgentENV 容器 / server 进程<br/>原 OverlayBD / ublk 管理<br/>E：通用外部设备 + 生命周期扩展<br/>原生 API loopback :8000"]
+   FC["P：Firecracker 主机子进程<br/>独立 VM 内 guest / envd / ext4"]
+   P --> FC
+  end
+  SN["SSF Node DaemonSet Pod / 进程<br/>N：gRPC / Stage-Publish / 引用 / bbolt<br/>HTTPS Evidence Client"]
+  DN["CSI Node DaemonSet Pod<br/>K：node-driver-registrar<br/>D：Node + Identity / UDS"]
+  HOST["宿主持久路径<br/>/var/lib/ssf；/var/lib/agentenvadapter<br/>/var/lib/agentenv-external；/var/lib/aenv；/dev"]
+ end
+ CT -->|"固定 Worker mTLS RPC"| A
+ CT -.-> API
+ PV -.-> API
+ GU -.-> DB
+ CT --> DB
+ A --> SN --> DN
+ A <-->|"本 Pod 通用协议"| P
+ SN -.-> HOST
+ A -.-> HOST
+ P -.-> HOST
+ DN -.-> HOST
+ classDef common fill:#244351,stroke:#739bad,color:#c8dee6;
+ classDef custom fill:#44392c,stroke:#aa9066,color:#dfcfb2;
+ classDef native fill:#24364a,stroke:#617d9b,color:#c3d0dd;
+ classDef data fill:#253a33,stroke:#668b7d,color:#b4cfc3;
+ class API,PV native;
+ class GU,SN common;
+ class CT,A,P,FC,CSI,DN custom;
+ class HOST,DB data;

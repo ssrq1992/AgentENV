@@ -1,0 +1,84 @@
+{
+  "date": "2026-10-19",
+  "host": "macOS-13.7.8-x86_64-i386-64bit-Mach-O",
+  "python": "3.14.6",
+  "status": "PASS_OFFLINE_CHECKS_ONLY",
+  "scope": "Offline test-tool and documentation checks only",
+  "checks": {
+    "tool_unit_tests": {
+      "status": "PASS",
+      "tests": 4,
+      "exit_code": 0,
+      "command": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s adapter/agentenvadapter/tests/realenv -p 'test_*.py' -v"
+    },
+    "python_ast": {
+      "status": "PASS",
+      "files": 5
+    },
+    "example_config_json": "PASS",
+    "cli_help": [
+      {
+        "script": "suite.py",
+        "exit_code": 0
+      },
+      {
+        "script": "collect.py",
+        "exit_code": 0
+      },
+      {
+        "script": "device-scan.py",
+        "exit_code": 0
+      },
+      {
+        "script": "host-signal.py",
+        "exit_code": 0
+      }
+    ],
+    "bash_syntax": {
+      "blocks": 24,
+      "mode": "bash -n only; commands NOT executed"
+    },
+    "embedded_python_ast": {
+      "blocks": 5
+    },
+    "json_document_examples": {
+      "blocks": 1
+    },
+    "local_markdown_links": {
+      "checked": 54,
+      "anchors_checked": 2
+    },
+    "agentenv_patch_source_hashes": {
+      "files": 7,
+      "status": "PASS"
+    },
+    "protected_csi_document_sha256": "9733935a2c0e2d144b67c8404361c835e7f8ed45d2b508992cb230da31b3d5dc",
+    "prior_installation_deliverables_unchanged": "PASS"
+  },
+  "real_environment_status": "NOT_RUN",
+  "approved_for_production": false,
+  "source_sha256": {
+    "design/14-agentenvadapter-real-environment-test-plan.md": "89e057de1c7e1d9d0858864d17b4398dddf73addffe6184d453c6a43e1017b75",
+    "SSF/adapter/agentenvadapter/tests/realenv/README.md": "1f2fc41ce9ef628094769c5e2fac3dd59012d756fa4c517c855c1f892fa63f06",
+    "design/README.md": "53a455d5882c67dff14b83aa1f9a8a8ed9659529639da99c9d757b42da9a4365",
+    "SSF/adapter/agentenvadapter/README.md": "4172ce013cd98627c9ab5f8d22116ae981fb8215af89d32feb4d773bfe523f4c",
+    "SSF/adapter/agentenvadapter/tests/fault-matrix.md": "182da817ed8d786be5568833b91e8ac0b031c7a25daeee68f144d5aa961d9b6b",
+    "SSF/adapter/agentenvadapter/tests/realenv/collect.py": "27ae44a0ce0dd4e4b1a3a02f8f3aaf53c59d027a2eae705c0607c7365c63ba4c",
+    "SSF/adapter/agentenvadapter/tests/realenv/device-scan.py": "0ed443c50489c481e73a153b6358754e5fadf8a7b61143e18f2f335906f8b0ea",
+    "SSF/adapter/agentenvadapter/tests/realenv/host-signal.py": "533d0fbd298b14b1248325a109a1dec7ccb3493b41eb2faeac45a86887e69fb4",
+    "SSF/adapter/agentenvadapter/tests/realenv/suite.py": "3f06d45c184ab4fdf1447cb33f65f55d964c7da08ad0f32923ad656e91619f77",
+    "SSF/adapter/agentenvadapter/tests/realenv/test_tools.py": "ea6567088d37f9437ef83cabe0a8b71067f803d10c764e67f250c5ee3018a4cd",
+    "SSF/adapter/agentenvadapter/tests/realenv/config.example.json": "6b2942081412863b10feeeece3ba017e69552c766d6d176b738cb380d5913c35"
+  },
+  "not_run": [
+    "Real Kubernetes API or admission tests",
+    "PostgreSQL/CSI/SSF/AgentENV process integration",
+    "Linux KVM/ublk and real guest data tests",
+    "Any host-signal or network fault injection",
+    "Real kernel device scan",
+    "Vendor backend and multi-node topology",
+    "Performance and soak tests",
+    "Rust compilation and regression"
+  ],
+  "errors": []
+}

@@ -1,0 +1,38 @@
+%%{init:{"theme":"dark","themeVariables":{"fontFamily":"PingFang SC, sans-serif"}}}%%
+sequenceDiagram
+ participant U as 租户
+ participant C as adapter control + Consumption
+ participant D as PostgreSQL
+ participant K as K8S + CSI Controller
+ participant N as adapter node
+ participant S as SSF Node + CSI Node
+ participant A as AgentENV / Firecracker / guest
+ U->>C: Create(request_id, launch, PVC mounts)
+ C->>D: 幂等实例 UID / 事务计算预留
+ C->>K: Resolve UID / WFFC选点与绑定 / topology
+ C->>D: Acquire / Attach intent
+ C->>K: ControllerPublish（如需要）
+ C->>N: 完整签名计划
+ N->>N: fsync start intent
+ N->>S: PrepareVolumes
+ S->>S: intent → Stage / Publish → 真实设备核验
+ S-->>N: BlockDevice endpoints
+ N->>N: 检查 ext4；显式新卷才持久化 format intent 后初始化
+ N->>A: 本机 create + opaque ticket
+ A->>N: prepare → launching → starting(pid) 授权
+ A->>A: 设备接入 + guest容量/UUID/readonly/ext4核验
+ A->>N: fsynced ready + 通知
+ N->>S: Ready（S回调N核验实际证据）
+ N-->>C: Ready
+ C->>D: Commit
+ C-->>U: operation Ready
+ U->>C: DELETE operation
+ C->>D: durable stop intent
+ C->>N: revoke / stop
+ N->>A: 停止；确认 VMM 实例退出
+ A->>N: fsynced stopped / 可恢复通知
+ C->>N: release
+ N->>S: Release（最后holder才Unstage）
+ C->>K: 最后holder才ControllerUnpublish
+ C->>D: 释放消费权 / 计算预留
+ C-->>U: Released；PVC仍保留

@@ -656,10 +656,21 @@ pub struct OrchestratorConfig {
 /// Custom extension service integration.
 ///
 /// The custom extension is an external HTTP service that extends node
-/// behavior. Its only current capability is sandbox lifecycle hooks
-/// (`/sandbox-hook/*`), but more may be added in the future.
+/// behavior through lifecycle hooks (`/sandbox-hook/*`) and an optional generic
+/// external block provider (`/storage/*`). Both are disabled by default.
 #[derive(Debug, Config, Clone)]
 pub struct CustomExtensionConfig {
+    /// Require a generic external-storage launch ticket on dedicated nodes.
+    #[config(default = false, env = "AENV_EXTERNAL_STORAGE_REQUIRED")]
+    pub storage_required: bool,
+    #[config(default = "/var/lib/agentenv-external")]
+    pub storage_state_dir: PathBuf,
+    #[config(default = "/var/lib/ssf")]
+    pub storage_device_root: PathBuf,
+    /// The last N reserved volume slots are read-only in new templates.
+    #[config(default = 0usize)]
+    pub storage_readonly_slots: usize,
+
     /// Optional HTTP base URL of the custom extension service.
     /// When unset, the custom extension integration is fully disabled.
     #[config(env = "AENV_CUSTOM_EXTENSION_URL", parse_env = parse_trimmed_string)]

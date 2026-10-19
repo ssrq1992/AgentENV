@@ -1,0 +1,13 @@
+{
+  "host": "Ubuntu 24.04 amd64, Linux 6.8+ with KVM and ublk",
+  "go": "1.26.0",
+  "rust": "1.99.1",
+  "cargo-chef": "0.1.71",
+  "agentenv_commit": "6cccaa7842bd5be2051111d4f74d9e37aa721244",
+  "kind_node": "kindest/node:v1.35.0",
+  "postgres": "postgres:17.4",
+  "firecracker": "1.15.1-patch-v1 (AgentENV config/deps_manifest.toml)",
+  "guest_kernel": "vmlinux-6.1.175 (AgentENV dependency manifest)",
+  "overlaybd": "v1.0.18-aenv.1",
+  "notes": "VM tests require a real KVM/ublk worker. kind-only tests cover the Kubernetes API, not VMM. Image tags must be resolved to immutable digests and archived in the actual run report."
+}

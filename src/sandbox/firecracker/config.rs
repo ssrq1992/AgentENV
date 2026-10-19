@@ -158,6 +158,8 @@ pub struct FirecrackerCommonConfig {
     /// Existing placeholder drives that can be rebound to launch-time volumes.
     #[serde(default)]
     pub volume_drive_slots: usize,
+    #[serde(default)]
+    pub volume_readonly_slots: usize,
     pub ublk_config: Option<UblkConfig>,
     /// Cluster-wide CPU intersection received from the scheduler.
     /// When set, applied via `PUT /cpu-config` before the VM boots.
@@ -207,6 +209,7 @@ impl FirecrackerCommonConfig {
             extra_drives: Vec::new(),
             physical_extra_drive_count: 0,
             volume_drive_slots: 0,
+            volume_readonly_slots: 0,
             ublk_config: None,
             cpu_config_json: None,
             network_policy: None,
@@ -547,6 +550,7 @@ impl FirecrackerSnapshotConfig {
             extra_drives,
             physical_extra_drive_count,
             volume_drive_slots: manifest.volume_drive_slots,
+            volume_readonly_slots: manifest.volume_readonly_slots,
             ..base_common
         };
 

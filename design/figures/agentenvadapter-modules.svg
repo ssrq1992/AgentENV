@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1480" height="1300" viewBox="0 0 1480 1300">
+<rect width="1480" height="1300" fill="#0f1822"/>
+<g font-family="PingFang SC, Microsoft YaHei, sans-serif" fill="#c4d0dc">
+<text x="32" y="48" font-size="30">AgentENV × SSF · 模块与权威边界</text>
+<text x="32" y="84" font-size="18">K 原生 Kubernetes　N 公共 SSF　A 项目适配　P 原生 AgentENV　E 通用扩展　D 厂商 Driver　B 持久存储</text>
+<rect x="24" y="112" width="1432" height="245" rx="8" fill="#111c27" stroke="#64798d"/>
+<text x="44" y="144" font-size="23">① Kubernetes 负责卷管理</text>
+<rect x="44.0" y="164" width="450.6666666666667" height="169" rx="6" fill="#24364a" stroke="#617d9b"/>
+<text x="59.0" y="194" font-size="19">K：StorageClass / PVC / PV</text>
+<text x="59.0" y="223" font-size="19">PV Controller：原生绑定</text>
+<text x="59.0" y="252" font-size="19">官方 CSI sidecars：原生生命周期</text>
+<rect x="514.6666666666667" y="164" width="450.6666666666667" height="169" rx="6" fill="#3d3328" stroke="#937b56"/>
+<text x="529.6666666666667" y="194" font-size="19">D：Controller / Identity</text>
+<text x="529.6666666666667" y="223" font-size="19">Create / Delete / Expand / Snapshot</text>
+<text x="529.6666666666667" y="252" font-size="19">通过原生组件进入后端</text>
+<rect x="985.3333333333334" y="164" width="450.6666666666667" height="169" rx="6" fill="#244351" stroke="#739bad"/>
+<text x="1000.3333333333334" y="194" font-size="19">N：独立 SSF Guard</text>
+<text x="1000.3333333333334" y="223" font-size="19">受管 PVC / PV / Pod 准入</text>
+<text x="1000.3333333333334" y="252" font-size="19">排空与回收许可</text>
+<rect x="24" y="377" width="1432" height="260" rx="8" fill="#111c27" stroke="#64798d"/>
+<text x="44" y="409" font-size="23">② Adapter control 内嵌公共 Consumption</text>
+<rect x="44.0" y="429" width="450.6666666666667" height="184" rx="6" fill="#44392c" stroke="#aa9066"/>
+<text x="59.0" y="459" font-size="19">A：mTLS API / 幂等 / Placement</text>
+<text x="59.0" y="488" font-size="19">不可复用 instance UID</text>
+<text x="59.0" y="517" font-size="19">固定 Node UID / Boot ID</text>
+<text x="59.0" y="546" font-size="19">租户 Namespace / 模板 catalog</text>
+<rect x="514.6666666666667" y="429" width="450.6666666666667" height="184" rx="6" fill="#244351" stroke="#739bad"/>
+<text x="529.6666666666667" y="459" font-size="19">N：Resolver / WFFC / Acquire</text>
+<text x="529.6666666666667" y="488" font-size="19">Controller Attach / BuildPlan</text>
+<text x="529.6666666666667" y="517" font-size="19">Commit / Release / 恢复</text>
+<text x="529.6666666666667" y="546" font-size="19">仅消费接口，不供卷</text>
+<rect x="985.3333333333334" y="429" width="450.6666666666667" height="184" rx="6" fill="#253a33" stroke="#668b7d"/>
+<text x="1000.3333333333334" y="459" font-size="19">B：一个共享 PostgreSQL</text>
+<text x="1000.3333333333334" y="488" font-size="19">ssf_*：消费权唯一权威</text>
+<text x="1000.3333333333334" y="517" font-size="19">agentenv_adapter_*：项目映射</text>
+<text x="1000.3333333333334" y="546" font-size="19">租约过期不代表 fencing</text>
+<rect x="24" y="657" width="1432" height="290" rx="8" fill="#111c27" stroke="#64798d"/>
+<text x="44" y="689" font-size="23">③ Worker 直接执行，运行实例提供真实证据</text>
+<rect x="44.0" y="709" width="450.6666666666667" height="214" rx="6" fill="#44392c" stroke="#aa9066"/>
+<text x="59.0" y="739" font-size="19">A：节点 sidecar / bbolt</text>
+<text x="59.0" y="768" font-size="19">签名计划 → SSF Prepare</text>
+<text x="59.0" y="797" font-size="19">受保护 ticket → AgentENV</text>
+<text x="59.0" y="826" font-size="19">E：设备 Provider / 生命周期日志</text>
+<text x="59.0" y="855" font-size="19">guest UUID / 容量 / RO 核验</text>
+<rect x="514.6666666666667" y="709" width="450.6666666666667" height="214" rx="6" fill="#244351" stroke="#739bad"/>
+<text x="529.6666666666667" y="739" font-size="19">N：SSF Node / WAL</text>
+<text x="529.6666666666667" y="768" font-size="19">NodeStage / NodePublish</text>
+<text x="529.6666666666667" y="797" font-size="19">共享 holder / Unstage</text>
+<text x="529.6666666666667" y="826" font-size="19">HTTPS EvidenceVerifier</text>
+<text x="529.6666666666667" y="855" font-size="19">D：标准 CSI Node / UDS</text>
+<rect x="985.3333333333334" y="709" width="450.6666666666667" height="214" rx="6" fill="#44392c" stroke="#aa9066"/>
+<text x="1000.3333333333334" y="739" font-size="19">P：Firecracker 主机子进程</text>
+<text x="1000.3333333333334" y="768" font-size="19">外部 virtio-block → guest ext4</text>
+<text x="1000.3333333333334" y="797" font-size="19">原 OverlayBD / ublk 路径保留</text>
+<text x="1000.3333333333334" y="826" font-size="19">API Ready 必须 guest 核验通过</text>
+<text x="1000.3333333333334" y="855" font-size="19">停止 VMM 后才能释放设备</text>
+<rect x="24" y="967" width="1432" height="255" rx="8" fill="#111c27" stroke="#64798d"/>
+<text x="44" y="999" font-size="23">④ 请求路径与业务 I/O</text>
+<rect x="44.0" y="1019" width="686.0" height="179" rx="6" fill="#244351" stroke="#739bad"/>
+<text x="59.0" y="1049" font-size="19">创建：预留 → 绑定 → Attach</text>
+<text x="59.0" y="1078" font-size="19">→ Prepare → guest ready → Commit</text>
+<text x="59.0" y="1107" font-size="19">释放：停止确认 → Unpublish</text>
+<text x="59.0" y="1136" font-size="19">→ 最后引用 Unstage / Detach</text>
+<rect x="750.0" y="1019" width="686.0" height="179" rx="6" fill="#253a33" stroke="#668b7d"/>
+<text x="765.0" y="1049" font-size="19">业务 I/O：guest → virtio-block</text>
+<text x="765.0" y="1078" font-size="19">→ host block device → 存储后端</text>
+<text x="765.0" y="1107" font-size="19">不经过 control / Guard / Gateway</text>
+<text x="765.0" y="1136" font-size="19">删除沙箱不会删除 PVC</text>
+<text x="32" y="1268" font-size="18">部署边界与模块归属图；完整控制调用、CSI RPC 与数据路径见同名 Mermaid / lifecycle 图。</text>
+</g></svg>

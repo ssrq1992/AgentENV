@@ -1,0 +1,477 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AgentENV SSF adapter",
+    "version": "0.1.0"
+  },
+  "security": [
+    {
+      "clientCertificate": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "clientCertificate": {
+        "type": "mutualTLS"
+      }
+    },
+    "schemas": {
+      "Mount": {
+        "type": "object",
+        "required": [
+          "namespace",
+          "pvc",
+          "id",
+          "path"
+        ],
+        "properties": {
+          "namespace": {
+            "type": "string"
+          },
+          "pvc": {
+            "type": "string"
+          },
+          "uid": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "readonly": {
+            "type": "boolean"
+          }
+        }
+      },
+      "CreateSandbox": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "request_id",
+          "kind",
+          "launch",
+          "mounts"
+        ],
+        "properties": {
+          "request_id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "cold",
+              "template"
+            ]
+          },
+          "launch": {
+            "type": "object",
+            "description": "Native launch JSON; volumeMounts, attachedDrives and customExtensionParams reserved; autoPause/autoResume disabled"
+          },
+          "mounts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/Mount"
+            }
+          }
+        }
+      },
+      "VolumeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "namespace",
+          "name",
+          "storage_class",
+          "bytes"
+        ],
+        "properties": {
+          "namespace": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "storage_class": {
+            "type": "string"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "initialize_ext4": {
+            "type": "boolean"
+          }
+        }
+      },
+      "PVC": {
+        "type": "object",
+        "description": "Native Kubernetes v1 PersistentVolumeClaim"
+      },
+      "Operation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "stopping": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "sandbox_id": {
+            "type": "string"
+          },
+          "sandbox": {
+            "type": "object"
+          },
+          "timings_ms": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      "Reclaim": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/v1/sandboxes": {
+      "post": {
+        "summary": "Accept creation; poll operation until Ready",
+        "responses": {
+          "202": {
+            "description": "Accept creation; poll operation until Ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or unsupported request"
+          },
+          "403": {
+            "description": "Identity/namespace forbidden"
+          },
+          "409": {
+            "description": "Conflict or operation remains pending"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSandbox"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/operations/{id}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Query durable operation",
+        "responses": {
+          "200": {
+            "description": "Query durable operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or unsupported request"
+          },
+          "403": {
+            "description": "Identity/namespace forbidden"
+          },
+          "409": {
+            "description": "Conflict or operation remains pending"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Accept stop; Released confirms cleanup",
+        "responses": {
+          "202": {
+            "description": "Accept stop; Released confirms cleanup",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or unsupported request"
+          },
+          "403": {
+            "description": "Identity/namespace forbidden"
+          },
+          "409": {
+            "description": "Conflict or operation remains pending"
+          }
+        }
+      }
+    },
+    "/v1/sandboxes/{id}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Query by adapter operation ID",
+        "responses": {
+          "200": {
+            "description": "Query by adapter operation ID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or unsupported request"
+          },
+          "403": {
+            "description": "Identity/namespace forbidden"
+          },
+          "409": {
+            "description": "Conflict or operation remains pending"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Accept stop without deleting PVC",
+        "responses": {
+          "202": {
+            "description": "Accept stop without deleting PVC",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or unsupported request"
+          },
+          "403": {
+            "description": "Identity/namespace forbidden"
+          },
+          "409": {
+            "description": "Conflict or operation remains pending"
+          }
+        }
+      }
+    },
+    "/v1/volumes": {
+      "post": {
+        "summary": "Create managed Block RWO Retain PVC",
+        "responses": {
+          "200": {
+            "description": "Create managed Block RWO Retain PVC",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PVC"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or unsupported request"
+          },
+          "403": {
+            "description": "Identity/namespace forbidden"
+          },
+          "409": {
+            "description": "Conflict or operation remains pending"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VolumeRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/volumes/{namespace}/{name}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "namespace",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Query PVC",
+        "responses": {
+          "200": {
+            "description": "Query PVC",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PVC"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or unsupported request"
+          },
+          "403": {
+            "description": "Identity/namespace forbidden"
+          },
+          "409": {
+            "description": "Conflict or operation remains pending"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Drain and reclaim through Kubernetes",
+        "responses": {
+          "202": {
+            "description": "Drain and reclaim through Kubernetes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reclaim"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or unsupported request"
+          },
+          "403": {
+            "description": "Identity/namespace forbidden"
+          },
+          "409": {
+            "description": "Conflict or operation remains pending"
+          }
+        },
+        "parameters": [
+          {
+            "in": "query",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reclaim",
+            "schema": {
+              "enum": [
+                "Retain",
+                "Delete"
+              ],
+              "default": "Retain"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/guest/{service}/{method}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "service",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "method",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "summary": "Authenticated ConnectRPC passthrough to process.Process or filesystem.Filesystem on the pinned instance",
+        "responses": {
+          "200": {
+            "description": "envd Connect stream or unary payload"
+          },
+          "409": {
+            "description": "Instance is not Ready"
+          }
+        }
+      }
+    }
+  }
+}

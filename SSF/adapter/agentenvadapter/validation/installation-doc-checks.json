@@ -1,0 +1,50 @@
+{
+  "date": "2026-10-19",
+  "host": "macOS; offline documentation checks only",
+  "status": "PASS: documentation and rendering checks; deployment NOT RUN",
+  "checks": {
+    "bash_syntax": {
+      "status": "PASS",
+      "blocks": 42
+    },
+    "embedded_python_syntax": {
+      "status": "PASS",
+      "blocks": 6
+    },
+    "installation_renderer_syntax": "PASS",
+    "json_list_and_stream_base_input": "PASS",
+    "render_reproducibility": "PASS",
+    "duplicate_object_identities": "PASS: none",
+    "installation_overlay_invariants": "PASS: root SSF node, workspace seed, shared PID, template mount, OnDelete, single-worker fixture/gateway",
+    "multiworker_fixture_rejected": "PASS",
+    "kubernetes_strict_typed_decode": {
+      "status": "PASS",
+      "files": 10,
+      "objects": 44,
+      "api_server_validation": false
+    },
+    "agentenv_patch_sources_unchanged": "PASS",
+    "protected_csi_document_sha256": "9733935a2c0e2d144b67c8404361c835e7f8ed45d2b508992cb230da31b3d5dc",
+    "relative_markdown_links": {
+      "status": "PASS",
+      "checked": 56
+    },
+    "source_sha256": {
+      "design/13-agentenvadapter-installation-and-deployment.md": "fd3d886821a4d0ac8ace23095968924702569eaa56f071d3a626536b0c0301b2",
+      "SSF/adapter/agentenvadapter/deploy/installation/render.py": "f1b5989d681c1d21cb8607a10d859d42396878ce2c12ae4e1798bce23a8fa283"
+    },
+    "table_of_contents_anchors": {
+      "status": "PASS",
+      "checked": 17
+    }
+  },
+  "not_run": [
+    "Docker image builds and Rust compilation",
+    "kubectl client/server dry-run and real cluster installation",
+    "PostgreSQL migrations and Guard admission",
+    "Linux mount propagation, KVM and ublk",
+    "real template build, guest read/write/readonly and release",
+    "fault injection and performance",
+    "vendor CSI and multiworker deployment"
+  ]
+}

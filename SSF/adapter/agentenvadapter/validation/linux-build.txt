@@ -1,0 +1,1 @@
+/private/tmp/agentenvadapter-linux: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, Go BuildID=BSO3cUtpQXaSwbeC4qmw/YQkP0u1x0UDdZao6aSId/cdcmWHQUWTkVPlocqSmK/UNN_8mWtS4qSLlnUb-7M, BuildID[sha1]=515cd6a145f4d7ff935e60bb114bce8993f0fb96, with debug_info, not stripped

@@ -1,0 +1,9 @@
+{
+  "listen": ":9444", "health_listen": ":9091",
+  "cert": "/tls/tls.crt", "key": "/tls/tls.key", "ca": "/tls/ca.crt",
+  "signing_key": "/signing/plan.key",
+  "principals": {"spiffe://ssf/agentenv/user/demo": {"tenant": "demo", "namespaces": ["agentenv-demo"]}},
+  "workers": [{"name": "worker-1", "url": "https://aenv-worker-1.agentenv-ssf.svc:9444", "capacity": {"cpu": 8, "memory_mib": 8192}}],
+  "drivers": [{"Name": "test.block.ssf.dev", "ControllerEndpoint": "ssf-gateway.ssf-fixture.svc:9443", "Revision": "1"}],
+  "templates": {}
+}

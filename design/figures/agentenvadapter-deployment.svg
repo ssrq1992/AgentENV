@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1480" height="1300" viewBox="0 0 1480 1300">
+<rect width="1480" height="1300" fill="#0f1822"/>
+<g font-family="PingFang SC, Microsoft YaHei, sans-serif" fill="#c4d0dc">
+<text x="32" y="48" font-size="30">AgentENV × SSF · 完整部署与进程边界</text>
+<text x="32" y="84" font-size="18">K 原生 Kubernetes　N 公共 SSF　A 项目适配　P 原生 AgentENV　E 通用扩展　D 厂商 Driver　B 持久存储</text>
+<rect x="24" y="112" width="1432" height="245" rx="8" fill="#111c27" stroke="#64798d"/>
+<text x="44" y="144" font-size="23">① 集群管理组件 / 原生 CSI</text>
+<rect x="44.0" y="164" width="450.6666666666667" height="169" rx="6" fill="#24364a" stroke="#617d9b"/>
+<text x="59.0" y="194" font-size="19">API Server / SC / PVC / PV</text>
+<text x="59.0" y="223" font-size="19">kube-controller-manager Pod</text>
+<text x="59.0" y="252" font-size="19">PV Controller / binder</text>
+<rect x="514.6666666666667" y="164" width="450.6666666666667" height="169" rx="6" fill="#3d3328" stroke="#937b56"/>
+<text x="529.6666666666667" y="194" font-size="19">CSI Controller Pod</text>
+<text x="529.6666666666667" y="223" font-size="19">K：provisioner / resizer</text>
+<text x="529.6666666666667" y="252" font-size="19">K：attacher / snapshotter（按需）</text>
+<text x="529.6666666666667" y="281" font-size="19">D：厂商 Controller + Identity</text>
+<text x="529.6666666666667" y="310" font-size="19">N：条件 Gateway sidecar / UDS</text>
+<rect x="985.3333333333334" y="164" width="450.6666666666667" height="169" rx="6" fill="#244351" stroke="#739bad"/>
+<text x="1000.3333333333334" y="194" font-size="19">SSF Guard Deployment / Pod</text>
+<text x="1000.3333333333334" y="223" font-size="19">Admission / 使用授权 / 排空</text>
+<text x="1000.3333333333334" y="252" font-size="19">从共享账本校验保护状态</text>
+<rect x="24" y="377" width="1432" height="245" rx="8" fill="#111c27" stroke="#64798d"/>
+<text x="44" y="409" font-size="23">② 适配控制面：独立 Deployment</text>
+<rect x="44.0" y="429" width="686.0" height="169" rx="6" fill="#44392c" stroke="#aa9066"/>
+<text x="59.0" y="459" font-size="19">agentenv-control Pod / 进程</text>
+<text x="59.0" y="488" font-size="19">A：API / Placement / 元数据恢复</text>
+<text x="59.0" y="517" font-size="19">N：嵌入式 Consumption</text>
+<text x="59.0" y="546" font-size="19">mTLS → 固定 Worker Service</text>
+<rect x="750.0" y="429" width="686.0" height="169" rx="6" fill="#253a33" stroke="#668b7d"/>
+<text x="765.0" y="459" font-size="19">外部持久 PostgreSQL</text>
+<text x="765.0" y="488" font-size="19">ssf_* + agentenv_adapter_*</text>
+<text x="765.0" y="517" font-size="19">不是两份消费账本</text>
+<text x="765.0" y="546" font-size="19">迁移：独立 agentenv-migrate Job</text>
+<rect x="24" y="642" width="1432" height="350" rx="8" fill="#111c27" stroke="#64798d"/>
+<text x="44" y="674" font-size="23">③ 专用 Worker：Pod 内共享 PID namespace，SSF Node 另一个 Pod</text>
+<rect x="44.0" y="694" width="450.6666666666667" height="274" rx="6" fill="#44392c" stroke="#aa9066"/>
+<text x="59.0" y="724" font-size="19">aenv-worker DaemonSet Pod</text>
+<text x="59.0" y="753" font-size="19">A：adapter node 容器</text>
+<text x="59.0" y="782" font-size="19">Prepare / Runtime / Evidence</text>
+<text x="59.0" y="811" font-size="19">P+E：AgentENV server 容器</text>
+<text x="59.0" y="840" font-size="19">loopback :8000 / Hook :9445</text>
+<text x="59.0" y="869" font-size="19">P：Firecracker 主机子进程</text>
+<text x="59.0" y="898" font-size="19">VM 内 guest / envd / ext4</text>
+<rect x="514.6666666666667" y="694" width="450.6666666666667" height="274" rx="6" fill="#244351" stroke="#739bad"/>
+<text x="529.6666666666667" y="724" font-size="19">SSF Node DaemonSet Pod</text>
+<text x="529.6666666666667" y="753" font-size="19">gRPC :9443 / health :9090</text>
+<text x="529.6666666666667" y="782" font-size="19">N：Stage / Publish / shared refs</text>
+<text x="529.6666666666667" y="811" font-size="19">N：bbolt WAL / 恢复</text>
+<text x="529.6666666666667" y="840" font-size="19">HTTPS → sidecar Evidence</text>
+<text x="529.6666666666667" y="869" font-size="19">按 Worker 固定 Service</text>
+<text x="529.6666666666667" y="898" font-size="19">不创建逐沙箱 Pod</text>
+<rect x="985.3333333333334" y="694" width="450.6666666666667" height="274" rx="6" fill="#3d3328" stroke="#937b56"/>
+<text x="1000.3333333333334" y="724" font-size="19">CSI Node DaemonSet Pod</text>
+<text x="1000.3333333333334" y="753" font-size="19">K：node-driver-registrar</text>
+<text x="1000.3333333333334" y="782" font-size="19">D：Node + Identity</text>
+<text x="1000.3333333333334" y="811" font-size="19">本机 UDS / CSI 标准 RPC</text>
+<text x="1000.3333333333334" y="840" font-size="19">HostPath 共享真实 block target</text>
+<text x="1000.3333333333334" y="869" font-size="19">不负责 guest 文件系统就绪</text>
+<rect x="24" y="1012" width="1432" height="210" rx="8" fill="#111c27" stroke="#64798d"/>
+<text x="44" y="1044" font-size="23">④ 宿主持久路径与挂载传播</text>
+<rect x="44.0" y="1064" width="686.0" height="134" rx="6" fill="#253a33" stroke="#668b7d"/>
+<text x="59.0" y="1094" font-size="19">/var/lib/ssf：host publish + SSF WAL</text>
+<text x="59.0" y="1123" font-size="19">/var/lib/agentenvadapter：适配 bbolt</text>
+<text x="59.0" y="1152" font-size="19">/var/lib/agentenv-external：原生实例日志</text>
+<rect x="750.0" y="1064" width="686.0" height="134" rx="6" fill="#253a33" stroke="#668b7d"/>
+<text x="765.0" y="1094" font-size="19">/var/lib/aenv：原生镜像与运行目录</text>
+<text x="765.0" y="1123" font-size="19">/dev：块设备 / KVM / ublk</text>
+<text x="765.0" y="1152" font-size="19">CSI+SSF Bidirectional；VM HostToContainer</text>
+<text x="32" y="1268" font-size="18">部署边界与模块归属图；完整控制调用、CSI RPC 与数据路径见同名 Mermaid / lifecycle 图。</text>
+</g></svg>

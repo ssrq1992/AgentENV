@@ -417,6 +417,14 @@ where
     /// This call only returns after the sandbox is fully ready and persisted
     /// as `Running`, so callers can treat a successful return as immediately
     /// usable without additional polling.
+    async fn reject_external_lifecycle(&self, id: SandboxId) -> Result<()> {
+        if let Some(metadata) = self.store.get(&id).await? {
+            crate::sandbox::custom_extension::storage::reject_managed(metadata.custom_extension_params.as_ref())
+                .map_err(|e| OrchestratorError::InternalError(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     pub async fn create_sandbox(
         self: &Arc<Self>,
         request: CreateSandboxRequest,
@@ -471,6 +479,11 @@ where
             extra_drives: launch_extra_drives,
             extra_drives_in_snapshot,
         } = request;
+        if crate::sandbox::custom_extension::storage::requested(custom_extension_params.as_ref()) {
+            if auto_resume || !matches!(timeout_action, super::SandboxTimeoutAction::Delete) {
+                return Err(OrchestratorError::InternalError("external storage requires delete-on-timeout and disables automatic resume".into()));
+            }
+        }
         let envd_access_token = secure.then(|| self.access_tokens.generate(sandbox_id));
         info!(timeout = ?timeout, "creating sandbox");
 
@@ -632,6 +645,7 @@ where
         count: u32,
         new_timeout: NewTimeout,
     ) -> Result<Vec<SandboxForkOutcome>> {
+        self.reject_external_lifecycle(source_sandbox_id).await?;
         if self
             .store
             .get(&source_sandbox_id)
@@ -658,6 +672,7 @@ where
         child_specs: Vec<SandboxForkChildSpec>,
         new_timeout: NewTimeout,
     ) -> Result<Vec<SandboxForkOutcome>> {
+        self.reject_external_lifecycle(source_sandbox_id).await?;
         let this = Arc::clone(self);
         self.run_cancellation_safe("fork", source_sandbox_id, async move {
             this.fork_sandbox_inner(source_sandbox_id, child_specs, new_timeout)
@@ -1389,6 +1404,7 @@ where
     /// sandbox (`Pausing` state), this call waits for it to complete and then
     /// returns the outcome rather than duplicating the work.
     pub async fn pause_sandbox(self: &Arc<Self>, sandbox_id: SandboxId) -> Result<()> {
+        self.reject_external_lifecycle(sandbox_id).await?;
         let this = Arc::clone(self);
         self.run_cancellation_safe("pause", sandbox_id, async move {
             this.pause_sandbox_inner(sandbox_id).await
@@ -1633,6 +1649,7 @@ where
         sandbox_id: SandboxId,
         timeout: NewTimeout,
     ) -> Result<SandboxMetadata> {
+        self.reject_external_lifecycle(sandbox_id).await?;
         let this = Arc::clone(self);
         self.run_cancellation_safe("resume", sandbox_id, async move {
             this.resume_sandbox_inner(sandbox_id, timeout).await
@@ -1767,6 +1784,7 @@ where
         self: &Arc<Self>,
         sandbox_id: SandboxId,
     ) -> Result<SnapshotCaptureResult> {
+        self.reject_external_lifecycle(sandbox_id).await?;
         let this = Arc::clone(self);
         self.run_cancellation_safe("snapshot", sandbox_id, async move {
             this.capture_snapshot_inner(sandbox_id).await
@@ -1861,6 +1879,7 @@ where
     /// Seals writable persistent-volume uppers without capturing the VM's
     /// rootfs, memory, or device state so callers can clone them locally.
     pub async fn snapshot_volume_mounts(self: &Arc<Self>, sandbox_id: SandboxId) -> Result<()> {
+        self.reject_external_lifecycle(sandbox_id).await?;
         let this = Arc::clone(self);
         self.run_cancellation_safe("snapshot_volumes", sandbox_id, async move {
             this.snapshot_volume_mounts_inner(sandbox_id).await
@@ -2009,6 +2028,7 @@ where
         sandbox_id: SandboxId,
         patch: serde_json::Map<String, serde_json::Value>,
     ) -> Result<Option<CustomExtensionParams>> {
+        self.reject_external_lifecycle(sandbox_id).await?;
         let this = Arc::clone(self);
         self.run_cancellation_safe("patch_custom_extension_params", sandbox_id, async move {
             this.patch_sandbox_custom_extension_params_inner(sandbox_id, patch)
@@ -2812,7 +2832,7 @@ where
                         unreachable!("paused sandboxes should have been filtered out")
                     }
                     SandboxState::Running => {
-                        let result = if metadata.template_builder {
+                        let result = if metadata.template_builder || crate::sandbox::custom_extension::storage::requested(metadata.custom_extension_params.as_ref()) {
                             self.delete_sandbox_inner(sandbox_id).await
                         } else {
                             self.pause_sandbox_inner(sandbox_id).await
