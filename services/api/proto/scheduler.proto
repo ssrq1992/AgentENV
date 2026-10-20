@@ -56,10 +56,15 @@ message NewSandboxHint {
 message ScheduleRequest {
   reserved 1;  // formerly: string hint = 1
   ScheduleRequestHint hint = 2;
+  // Authenticated opaque native launch intent, independent of any CSI backend.
+  // Optional when the storage plugin is disabled. Never supplied by SDKs.
+  bytes storage_intent = 3;
 }
 
 message ScheduleResponse {
   Node node = 1;
+  // Full signed storage dispatch, passed unchanged to the selected native node.
+  bytes storage_dispatch = 2;
 }
 
 message ListNodesRequest {}
@@ -156,6 +161,7 @@ message ObservedNode {
   MachineInfo machine_info = 7;
   NodeSnapshot snapshot = 8;
   int64 last_seen_unix_ms = 9;
+  repeated string sandbox_ids = 10;
 }
 
 message HeartbeatRequest {
@@ -269,3 +275,11 @@ message UnregisterNodeRequest {
 }
 
 message UnregisterNodeResponse {}
+
+// Internal plugin calls do not create or delete VMs; the native Orchestrator
+// remains the only lifecycle owner. Role authentication is mandatory.
+service StorageControl {
+  rpc Invoke(StorageControlRequest) returns (StorageControlResponse);
+}
+message StorageControlRequest { bytes envelope = 1; }
+message StorageControlResponse { bytes envelope = 1; }

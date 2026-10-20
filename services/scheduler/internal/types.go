@@ -10,6 +10,7 @@ type Node struct {
 // RichNode combines discovery identity with observed runtime state.
 // Strategy implementations can use Snapshot for load-aware scheduling.
 type RichNode struct {
+	SandboxIDs []string
 	Node
 	Snapshot *schedulerv1.NodeSnapshot // nil if no heartbeat received yet
 }

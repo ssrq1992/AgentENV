@@ -1,6 +1,6 @@
 //! Custom extension integration: an optional external HTTP service
-//! (`[custom_extension].url`) extending sandbox behavior. Its only current
-//! capability is sandbox lifecycle hooks; see [`client`].
+//! (`[custom_extension].url`) extending sandbox behavior through lifecycle
+//! hooks. Generic external storage is independently configured in sandbox::storage.
 
 pub(crate) mod client;
 

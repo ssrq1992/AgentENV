@@ -175,6 +175,15 @@ impl FileBackedSandboxPersister {
     }
 
     async fn remove_artifact_root(path: &Path) -> PersistenceResult<()> {
+        if crate::sandbox::storage::artifacts::retained(path).map_err(|source| {
+            SandboxPersistenceError::io("inspect provider artifact protection", path, source)
+        })? {
+            if let Err(error) = crate::sandbox::storage::artifact_gc::request(path) {
+                tracing::warn!(%error, "native artifact retirement intent remains protected");
+            }
+            debug!(artifact_root = %path.display(), "provider checkpoint retains native artifacts");
+            return Ok(());
+        }
         match fs::remove_dir_all(path).await {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -275,12 +284,18 @@ impl SandboxPersister for FileBackedSandboxPersister {
             };
             let sandbox_id = record.metadata.id;
 
-            if record.lifecycle == PersistedPausedLifecycle::Resuming {
+            if record.lifecycle == PersistedPausedLifecycle::Resuming
+                && record.metadata.storage_context.is_none()
+            {
                 warn!(sandbox_id = %sandbox_id, "discarding paused sandbox record left in resuming state");
                 self.cleanup_invalid_record(&sandbox_id).await?;
                 continue;
             }
 
+            // A provider-managed resume has a deterministic successor run. Keep
+            // its original context so recovery/deletion can resolve that run;
+            // the provider rejects replay once a VMM has consumed the successor.
+            // Dropping this record would lose the only user-visible cleanup handle.
             if record.metadata.virtualization_mode != self.virtualization_mode {
                 warn!(
                     sandbox_id = %sandbox_id,
@@ -651,6 +666,48 @@ mod tests {
         assert!(loaded.is_empty());
         assert!(!has_record(&persister, &metadata.id).await?);
         assert!(!persister.sandbox_artifact_root(&metadata.id).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_resuming_records_keep_the_cleanup_identity() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let persister = test_persister(temp.path());
+        let sandbox_id = SandboxId::new();
+        let snapshot_root = persister
+            .sandbox_artifact_root(&sandbox_id)
+            .join("snapshot");
+        let paused_state = paused_state(&snapshot_root);
+        let metadata = SandboxMetadata {
+            id: sandbox_id,
+            paused_state: Some(Arc::clone(&paused_state)),
+            storage_context: Some(crate::sandbox::storage::StorageContext {
+                ticket: "opaque-provider-ticket".into(),
+                owner_uid: "owner".into(),
+                run_uid: "paused-run".into(),
+                request_id: "paused-request".into(),
+                template_pin: String::new(),
+                checkpoint_source: String::new(),
+                managed_mounts: vec![],
+                native_id: String::new(),
+                replace_mounts: false,
+                relocations: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        persister
+            .persist_paused(&metadata, Some(&snapshot_root), paused_state.as_ref())
+            .await?;
+        persister.mark_resuming(&metadata.id).await?;
+        let loaded = persister.load_all(&MockBackendFactory::new()).await?;
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].state, SandboxState::Paused);
+        assert_eq!(
+            loaded[0].storage_context.as_ref().unwrap().request_id,
+            "paused-request"
+        );
+        assert!(has_record(&persister, &metadata.id).await?);
+        assert!(persister.sandbox_artifact_root(&metadata.id).exists());
         Ok(())
     }
 

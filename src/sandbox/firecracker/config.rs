@@ -77,6 +77,20 @@ impl PersistentSnapshotRootGuard {
 
 impl Drop for PersistentSnapshotRootGuard {
     fn drop(&mut self) {
+        match crate::sandbox::storage::artifacts::retained(&self.path) {
+            Ok(false) => {}
+            Ok(true) => {
+                if let Err(error) = crate::sandbox::storage::artifact_gc::request(&self.path) {
+                    tracing::warn!(%error, "native artifact retirement intent retained locally");
+                }
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(snapshot_root = %self.path.display(), %error,
+                "retaining snapshot root because provider protection is unknown");
+                return;
+            }
+        }
         if let Err(err) = std::fs::remove_dir_all(&self.path) {
             if err.kind() != std::io::ErrorKind::NotFound {
                 tracing::warn!(
@@ -158,6 +172,14 @@ pub struct FirecrackerCommonConfig {
     /// Existing placeholder drives that can be rebound to launch-time volumes.
     #[serde(default)]
     pub volume_drive_slots: usize,
+    #[serde(default)]
+    pub volume_readonly_slots: usize,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub storage_slot_layout: std::collections::BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frozen_filesystems: Vec<crate::sandbox::storage::freeze::FrozenFilesystem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_checkpoint: Option<serde_json::Value>,
     pub ublk_config: Option<UblkConfig>,
     /// Cluster-wide CPU intersection received from the scheduler.
     /// When set, applied via `PUT /cpu-config` before the VM boots.
@@ -167,6 +189,9 @@ pub struct FirecrackerCommonConfig {
     /// start-fresh / start-resume hooks. Persisted with snapshot configs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_extension_params: Option<crate::sandbox::CustomExtensionParams>,
+    /// Launch-only capability. Never export a storage ticket in a template.
+    #[serde(skip)]
+    pub storage_context: Option<crate::sandbox::storage::StorageContext>,
     /// Effective disk I/O rate limit for the user rootfs drive. Carried in the
     /// common config so fresh boot and snapshot resume apply the same config
     /// and it persists across pause/resume, instead of each path reaching for
@@ -207,9 +232,14 @@ impl FirecrackerCommonConfig {
             extra_drives: Vec::new(),
             physical_extra_drive_count: 0,
             volume_drive_slots: 0,
+            volume_readonly_slots: 0,
+            storage_slot_layout: Default::default(),
+            frozen_filesystems: Vec::new(),
+            storage_checkpoint: None,
             ublk_config: None,
             cpu_config_json: None,
             network_policy: None,
+            storage_context: None,
             custom_extension_params: None,
             disk_rate_limit: crate::cfg::DiskRateLimitConfig::default(),
             envd_access_token: None,
@@ -420,6 +450,7 @@ impl FirecrackerSandboxConfig {
                 .with_extra(launch_config.extra_mmds.clone()),
         );
         self.common.network_policy = launch_config.network.clone();
+        self.common.storage_context = launch_config.storage_context.clone();
         self.common.custom_extension_params = launch_config.custom_extension_params.clone();
         self.common.envd_access_token = launch_config.envd_access_token.clone();
         self
@@ -455,6 +486,9 @@ impl FirecrackerSandboxConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FirecrackerSnapshotConfig {
+    /// Actual captured machine shape, retained across local pause and fork.
+    #[serde(default)]
+    pub resources: Option<crate::types::SandboxResources>,
     pub common: FirecrackerCommonConfig,
     /// The path to the Firecracker VM state snapshot file (for example, `vm_state.bin`).
     pub vm_state_path: PathBuf,
@@ -481,9 +515,42 @@ pub struct FirecrackerSnapshotConfig {
 
 impl FirecrackerSnapshotConfig {
     pub fn from_runnable_snapshot(snapshot: &RunnableSnapshot) -> Result<Self> {
+        Self::from_runnable_snapshot_with_storage(snapshot, None)
+    }
+
+    pub(crate) fn from_runnable_snapshot_with_storage(
+        snapshot: &RunnableSnapshot,
+        storage: Option<&crate::sandbox::storage::StorageContext>,
+    ) -> Result<Self> {
         let mut base_common =
             FirecrackerCommonConfig::from_global_config().context("load sandbox common config")?;
         let manifest = snapshot.manifest();
+        anyhow::ensure!(
+            manifest.storage_checkpoint == snapshot.committed().storage_checkpoint,
+            "provider checkpoint catalog and artifact disagree"
+        );
+        if manifest.storage_checkpoint.is_none() {
+            anyhow::ensure!(
+                storage.is_none_or(|context| context.checkpoint_source.is_empty()),
+                "admitted provider checkpoint missing from native artifact"
+            );
+        }
+        if let Some(checkpoint) = &manifest.storage_checkpoint {
+            let source = checkpoint
+                .get("reference")
+                .and_then(serde_json::Value::as_str)
+                .filter(|source| !source.is_empty())
+                .context("provider checkpoint reference missing")?;
+            let storage =
+                storage.context("provider checkpoint template requires an admitted clone plan")?;
+            anyhow::ensure!(
+                !storage.managed_mounts.is_empty()
+                    && storage.template_pin == snapshot.record().id.to_string()
+                    && storage.checkpoint_source == source
+                    && snapshot.committed().storage_checkpoint.as_ref() == Some(checkpoint),
+                "provider template checkpoint differs from admitted immutable version"
+            );
+        }
         if manifest.backend != FIRECRACKER_BACKEND {
             bail!(
                 "snapshot '{}' was captured by the {} backend, and a capture is restored by \
@@ -536,6 +603,32 @@ impl FirecrackerSnapshotConfig {
         } else {
             manifest.physical_extra_drive_count
         };
+        let mut storage_slot_layout = manifest.storage_slot_layout.clone();
+        if storage.is_some() && storage_slot_layout.is_empty() {
+            anyhow::ensure!(
+                manifest.storage_checkpoint.is_none(),
+                "provider snapshot predates stable device layout"
+            );
+            let mut legacy_paths = snapshot
+                .committed()
+                .volume_snapshots
+                .iter()
+                .map(|volume| volume.mount_path.clone())
+                .collect::<Vec<_>>();
+            legacy_paths.sort();
+            storage_slot_layout.extend(
+                legacy_paths
+                    .into_iter()
+                    .enumerate()
+                    .map(|(slot, path)| (path, slot)),
+            );
+        }
+        if let Some(context) = storage.filter(|context| context.replace_mounts) {
+            storage_slot_layout = crate::sandbox::storage::transition::relocate_layout(
+                &storage_slot_layout,
+                &context.relocations,
+            )?;
+        }
         let snapshot_common = FirecrackerCommonConfig {
             ublk_config: Some(overlaybd_ublk_config),
             envd_version: snapshot.committed().runtime_versions.envd_version.clone(),
@@ -547,6 +640,10 @@ impl FirecrackerSnapshotConfig {
             extra_drives,
             physical_extra_drive_count,
             volume_drive_slots: manifest.volume_drive_slots,
+            volume_readonly_slots: manifest.volume_readonly_slots,
+            storage_slot_layout,
+            frozen_filesystems: manifest.frozen_filesystems.clone(),
+            storage_checkpoint: manifest.storage_checkpoint.clone(),
             ..base_common
         };
 
@@ -557,6 +654,7 @@ impl FirecrackerSnapshotConfig {
         };
 
         Ok(Self {
+            resources: Some(*snapshot.resources()),
             common: snapshot_common,
             vm_state_path: manifest.vm_state.path.clone(),
             mem_overlaybd_config,
@@ -882,6 +980,7 @@ mod tests {
         .common;
         common.rootfs_virtual_size = Some(0);
         let mut snapshot = FirecrackerSnapshotConfig {
+            resources: None,
             memory_startup_pack: None,
             common,
             vm_state_path: vm_state_path.clone(),
@@ -922,6 +1021,66 @@ mod tests {
 
         fs::write(&rootfs_path, b"rootfs")?;
         snapshot.validate_persisted()?;
+        Ok(())
+    }
+
+    #[test]
+    fn provider_template_requires_matching_admitted_checkpoint() -> Result<()> {
+        let mut committed = CommittedSnapshot::mock();
+        committed.storage_checkpoint = Some(serde_json::json!({"reference":"checkpoint"}));
+        let snapshot =
+            RunnableSnapshot::from_test_manifest(SnapshotRecord::mock_ready(committed), Vec::new())
+                .with_test_storage_layout(std::collections::BTreeMap::from([("/data".into(), 0)]));
+        assert!(FirecrackerSnapshotConfig::from_runnable_snapshot(&snapshot).is_err());
+        let mut storage = crate::sandbox::storage::StorageContext {
+            ticket: "trusted-ticket".into(),
+            owner_uid: "owner".into(),
+            run_uid: "run".into(),
+            request_id: "request".into(),
+            template_pin: snapshot.record().id.to_string(),
+            checkpoint_source: "checkpoint".into(),
+            native_id: String::new(),
+            replace_mounts: false,
+            relocations: Vec::new(),
+            managed_mounts: vec![crate::sandbox::storage::ManagedMount {
+                name: "child-volume".into(),
+                path: "/data".into(),
+            }],
+        };
+        let config = FirecrackerSnapshotConfig::from_runnable_snapshot_with_storage(
+            &snapshot,
+            Some(&storage),
+        )?;
+        assert_eq!(
+            config.common.storage_checkpoint,
+            snapshot.manifest().storage_checkpoint
+        );
+        storage.checkpoint_source = "other-checkpoint".into();
+        assert!(
+            FirecrackerSnapshotConfig::from_runnable_snapshot_with_storage(
+                &snapshot,
+                Some(&storage)
+            )
+            .is_err()
+        );
+        storage.checkpoint_source = "checkpoint".into();
+        storage.template_pin = "other-version".into();
+        assert!(
+            FirecrackerSnapshotConfig::from_runnable_snapshot_with_storage(
+                &snapshot,
+                Some(&storage)
+            )
+            .is_err()
+        );
+        storage.template_pin = snapshot.record().id.to_string();
+        storage.managed_mounts.clear();
+        assert!(
+            FirecrackerSnapshotConfig::from_runnable_snapshot_with_storage(
+                &snapshot,
+                Some(&storage)
+            )
+            .is_err()
+        );
         Ok(())
     }
 

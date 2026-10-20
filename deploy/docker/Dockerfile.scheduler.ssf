@@ -1,0 +1,27 @@
+# Build from sandboxVolume, the common parent of AgentENV and SSF:
+# docker build -f AgentENV/deploy/docker/Dockerfile.scheduler.ssf .
+FROM golang:1.26-bookworm AS build
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+WORKDIR /src/AgentENV/services
+COPY AgentENV/services/go.ssf.mod AgentENV/services/go.ssf.sum ./
+COPY SSF/go.mod SSF/go.sum /src/SSF/
+RUN go mod download -modfile=go.ssf.mod
+COPY SSF /src/SSF
+COPY AgentENV/services /src/AgentENV/services
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -modfile=go.ssf.mod -tags ssf -trimpath -o /out/scheduler ./scheduler/cmd
+
+FROM alpine:3.21 AS grpc-health-probe
+ARG TARGETARCH=amd64
+RUN apk add --no-cache curl \
+    && case "${TARGETARCH}" in amd64|arm64) ;; *) exit 1 ;; esac \
+    && curl -fL "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/v0.4.46/grpc_health_probe-linux-${TARGETARCH}" -o /grpc_health_probe \
+    && chmod +x /grpc_health_probe
+
+FROM gcr.io/distroless/static-debian12
+COPY --from=build /out/scheduler /scheduler
+COPY --from=grpc-health-probe /grpc_health_probe /grpc_health_probe
+COPY AgentENV/deploy/docker/config/default.json /config/default.json
+ENTRYPOINT ["/scheduler"]
+CMD ["-config", "/config/default.json"]

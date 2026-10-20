@@ -60,6 +60,26 @@ pub enum VolumesVolumeIdDeleteResponse {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[must_use]
 #[allow(clippy::large_enum_variant)]
+pub enum VolumesVolumeIdExpandPostResponse {
+    /// Controller expansion complete
+    Status200_ControllerExpansionComplete(models::Volume),
+    /// Offline expansion pending
+    Status202_OfflineExpansionPending(models::Volume),
+    /// Bad request
+    Status400_BadRequest(models::Error),
+    /// Authentication error
+    Status401_AuthenticationError(models::Error),
+    /// Conflict
+    Status409_Conflict(models::Error),
+    /// Server error
+    Status500_ServerError(models::Error),
+    /// Volume provider does not support offline expansion
+    Status501_VolumeProviderDoesNotSupportOfflineExpansion(models::Error),
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[must_use]
+#[allow(clippy::large_enum_variant)]
 pub enum VolumesVolumeIdGetResponse {
     /// Successfully retrieved a team volume
     Status200_SuccessfullyRetrievedATeamVolume(models::Volume),
@@ -115,6 +135,20 @@ pub trait Volumes<E: std::fmt::Debug + Send + Sync + 'static = ()>: super::Error
         claims: &Self::Claims,
         path_params: &models::VolumesVolumeIdDeletePathParams,
     ) -> Result<VolumesVolumeIdDeleteResponse, E>;
+
+    /// Expand a provider volume offline.
+    ///
+    /// VolumesVolumeIdExpandPost - POST /volumes/{volumeID}/expand
+    async fn volumes_volume_id_expand_post(
+        &self,
+
+        method: &Method,
+        host: &Host,
+        cookies: &CookieJar,
+        claims: &Self::Claims,
+        path_params: &models::VolumesVolumeIdExpandPostPathParams,
+        body: &models::ExpandVolume,
+    ) -> Result<VolumesVolumeIdExpandPostResponse, E>;
 
     /// Team volume.
     ///

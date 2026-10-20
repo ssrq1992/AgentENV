@@ -168,6 +168,7 @@ func (r *AtomicNodeRegistry) Heartbeat(req *schedulerv1.HeartbeatRequest, now ti
 			Commit:            req.GetCommit(),
 			MachineInfo:       machineInfo,
 			LastSeenUnixMs:    nowMs,
+			SandboxIds:        append([]string(nil), req.GetSandboxIds()...),
 			Snapshot:          cloneSnapshot(req.GetSnapshot()),
 		},
 		p2pEndpoint: cloneP2PEndpoint(req.GetP2PEndpoint()),

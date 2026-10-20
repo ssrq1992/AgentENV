@@ -73,7 +73,7 @@ where
                     Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
                 }
             }
-            next.run(request).await
+            crate::sandbox::storage::request_scope(request, next).await
         } else {
             StatusCode::UNAUTHORIZED.into_response()
         };

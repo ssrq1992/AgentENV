@@ -94,6 +94,33 @@ pub struct SandboxForkSpec {
     pub replace_drive_ids: Vec<(String, String)>,
 }
 
+/// Per-child preparation runs after the single joint capture, before any VMM
+/// starts. Providers reserve resources; the native backend remains the VMM owner.
+#[derive(Clone, Debug)]
+pub struct ForkRuntimeMetadata {
+    /// A failed start whose stop outcome is unknown must remain natively owned.
+    pub failed_start: Option<String>,
+    pub storage_context: super::storage::StorageContext,
+    pub volume_mounts: std::collections::HashMap<String, String>,
+}
+
+pub struct PreparedForkChild {
+    pub spec: SandboxForkSpec,
+    pub metadata: ForkRuntimeMetadata,
+}
+
+#[async_trait]
+pub trait SandboxForkPreparer: Send + Sync {
+    async fn prepare(
+        &self,
+        manifest: &SandboxSnapshotManifest,
+        child: &SandboxForkSpec,
+    ) -> Result<PreparedForkChild>;
+    /// Called only before spawn or after a successful native stop. Unknown
+    /// stop outcomes retain resources for the native recovery path.
+    async fn cleanup_failed(&self, child: SandboxId);
+}
+
 /// Opaque set of local runtime artifacts a sandbox needs while it is alive.
 ///
 /// Sandbox backends construct this from their runtime config, the orchestrator
@@ -266,6 +293,18 @@ pub trait SandboxBackend: Send + 'static {
         spec: &[SandboxForkSpec],
     ) -> SandboxCaptureResult<Vec<SandboxForkResult>>;
 
+    async fn fork_prepared(
+        &mut self,
+        _spec: &[SandboxForkSpec],
+        _preparer: Arc<dyn SandboxForkPreparer>,
+    ) -> SandboxCaptureResult<Vec<SandboxForkResult>> {
+        Err(anyhow::anyhow!("backend does not support prepared fork").into())
+    }
+
+    fn fork_runtime_metadata(&self) -> Option<&ForkRuntimeMetadata> {
+        None
+    }
+
     /// Capture the guest into `at` and describe what was written.
     ///
     /// The guest is left held. A template build takes its snapshot this way
@@ -343,6 +382,22 @@ pub trait SandboxBackendFactory: Send + Sync + 'static {
         artifact_root: PathBuf,
         state: Value,
     ) -> Result<Arc<dyn PausedSandboxState>>;
+
+    /// Resume with a newly admitted storage run. Backends must explicitly opt
+    /// into external devices; silently dropping a provider context is forbidden.
+    fn build_from_paused_state_with_storage(
+        &self,
+        sandbox_id: crate::types::SandboxId,
+        state: &dyn PausedSandboxState,
+        envd_access_token: Option<EnvdAccessToken>,
+        storage_context: Option<crate::sandbox::storage::StorageContext>,
+    ) -> Result<Box<dyn SandboxBackend>> {
+        anyhow::ensure!(
+            storage_context.is_none(),
+            "backend cannot resume provider storage"
+        );
+        self.build_from_paused_state(sandbox_id, state, envd_access_token)
+    }
 
     /// Build a sandbox backend from backend-specific paused state captured by `pause`.
     fn build_from_paused_state(

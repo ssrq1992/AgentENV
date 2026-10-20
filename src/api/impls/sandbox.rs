@@ -108,6 +108,33 @@ fn volume_mounts_model(mounts: &HashMap<String, String>) -> Vec<models::SandboxV
         .collect()
 }
 
+fn volume_mounts_with_storage(
+    mounts: &HashMap<String, String>,
+    storage: Option<&crate::sandbox::storage::StorageContext>,
+) -> Vec<models::SandboxVolumeMount> {
+    let mut result = if storage.is_some() {
+        volume_mounts_model(
+            &mounts
+                .iter()
+                .filter(|(path, _)| !crate::sandbox::storage::transition::retained(path))
+                .map(|(path, name)| (path.clone(), name.clone()))
+                .collect(),
+        )
+    } else {
+        volume_mounts_model(mounts)
+    };
+    if let Some(storage) = storage {
+        result.extend(
+            storage
+                .managed_mounts
+                .iter()
+                .filter(|mount| !crate::sandbox::storage::transition::retained(&mount.path))
+                .map(|m| models::SandboxVolumeMount::new(m.name.clone(), m.path.clone())),
+        );
+    }
+    result
+}
+
 fn volume_mounts_from_model(
     mounts: Option<&[models::SandboxVolumeMount]>,
 ) -> Result<Option<HashMap<String, String>>, models::Error> {
@@ -117,6 +144,14 @@ fn volume_mounts_from_model(
 
     let mut result = HashMap::with_capacity(mounts.len());
     for mount in mounts {
+        if super::volume_provider::enabled()
+            && crate::sandbox::storage::transition::retained(&mount.path)
+        {
+            return Err(ApiImpl::error(
+                400,
+                "mount path reserved for retained native filesystems",
+            ));
+        }
         if result
             .insert(mount.path.clone(), mount.name.clone())
             .is_some()
@@ -145,8 +180,40 @@ async fn prepare_volume_mounts(
     let Some(mounts) = mounts.filter(|mounts| !mounts.is_empty()) else {
         return Ok(PreparedVolumeMounts::default());
     };
+    let context = crate::sandbox::storage::current_context();
+    let mut legacy_mounts = mounts.clone();
+    if let Some(context) = &context {
+        for managed in &context.managed_mounts {
+            if let Some(name) = legacy_mounts.get(&managed.path) {
+                if name != &managed.name {
+                    return Err(ApiImpl::error(
+                        409,
+                        "storage plan mount differs from native request",
+                    ));
+                }
+            }
+            legacy_mounts.remove(&managed.path);
+        }
+    }
+    if legacy_mounts.is_empty() {
+        return Ok(PreparedVolumeMounts::default());
+    }
     let owner = format!("pending-{}", Uuid::now_v7().simple());
-    let (drives, mounts) = resolve_volume_mounts(&api.volume_manager, mounts, &owner).await?;
+    let (drives, mounts) =
+        resolve_volume_mounts(&api.volume_manager, &legacy_mounts, &owner).await?;
+    if let Some(context) = context.as_ref() {
+        let ids = mounts.values().cloned().collect::<Vec<_>>();
+        if let Err(error) = api
+            .volume_manager
+            .persist_storage_reservation_cleanup(context, &owner, &ids)
+        {
+            let _ = api
+                .volume_manager
+                .replace_owner_for(&owner, None, &ids)
+                .await;
+            return Err(volume_error_response(error).1);
+        }
+    }
     Ok(PreparedVolumeMounts {
         owner: Some(owner),
         drives,
@@ -162,6 +229,10 @@ async fn finish_volume_reservation(
     volume_ids: &[String],
 ) -> Result<(), crate::volume::VolumeError> {
     let Some(owner) = owner else { return Ok(()) };
+    if sandbox_id.is_none() && crate::sandbox::storage::current_context().is_some() {
+        // A durable task releases this reservation only after verified stop.
+        return Ok(());
+    }
     let sandbox_id = sandbox_id.map(|id| id.to_string());
     manager
         .replace_owner_for(owner, sandbox_id.as_deref(), volume_ids)
@@ -183,6 +254,9 @@ async fn cleanup_fork_volume_children(
 }
 
 async fn cleanup_volume_ids(manager: &VolumeManager, volume_ids: &[String]) {
+    if crate::sandbox::storage::current_context().is_some() {
+        return;
+    }
     for volume_id in volume_ids {
         let _ = manager.delete(volume_id).await;
     }
@@ -271,9 +345,36 @@ async fn prepare_volume_fork_specs(
 async fn snapshot_sandbox_volumes(
     api: &ApiImpl,
     metadata: &SandboxMetadata,
+    manifest: &crate::sandbox::SandboxSnapshotManifest,
 ) -> Result<Vec<SnapshotVolume>, models::Error> {
     let mut snapshots = Vec::with_capacity(metadata.volume_mounts.len());
     for (mount_path, reference) in &metadata.volume_mounts {
+        if metadata.storage_context.is_some() {
+            let drive = manifest
+                .captured_volumes
+                .iter()
+                .find(|drive| {
+                    &drive.drive_id == reference
+                        && drive.mount_path == std::path::Path::new(mount_path)
+                })
+                .ok_or_else(|| ApiImpl::error(409, "joint capture is missing a legacy volume"))?;
+            let layers = api
+                .volume_manager
+                .publish_captured_backing(reference, &drive.image_config_path)
+                .await
+                .map_err(|error| volume_error_response(error).1)?;
+            snapshots.push(SnapshotVolume {
+                mount_path: mount_path.clone(),
+                mode: if drive.read_only {
+                    crate::volume::VolumeMode::ReadOnly
+                } else {
+                    crate::volume::VolumeMode::Exclusive
+                },
+                size_mb: drive.virtual_size.div_ceil(1024 * 1024),
+                layers,
+            });
+            continue;
+        }
         let snapshot = api
             .volume_manager
             .snapshot_volume_state(reference)
@@ -304,16 +405,31 @@ async fn restore_snapshot_volume_mounts(
             }
         };
         let name = format!("volume-restore-{}", Uuid::now_v7().simple());
-        let child = match api
-            .volume_manager
-            .create_from_snapshot(
-                name,
-                volume_snapshot.mode,
-                volume_snapshot.size_mb,
-                volume_snapshot.layers.clone(),
-            )
-            .await
-        {
+        let context = crate::sandbox::storage::current_context();
+        let created = if let Some(context) = context.as_ref() {
+            let private = context.replace_mounts
+                || crate::sandbox::storage::transition::retained(&volume_snapshot.mount_path);
+            api.volume_manager
+                .create_consumer_snapshot_volume(
+                    name,
+                    volume_snapshot.mode,
+                    volume_snapshot.size_mb,
+                    volume_snapshot.layers.clone(),
+                    context,
+                    private,
+                )
+                .await
+        } else {
+            api.volume_manager
+                .create_from_snapshot(
+                    name,
+                    volume_snapshot.mode,
+                    volume_snapshot.size_mb,
+                    volume_snapshot.layers.clone(),
+                )
+                .await
+        };
+        let child = match created {
             Ok(child) => child,
             Err(error) => {
                 cleanup_volume_ids(&api.volume_manager, &volume_ids).await;
@@ -324,6 +440,37 @@ async fn restore_snapshot_volume_mounts(
         mounts.insert(mount_path.to_string_lossy().into_owned(), child.id);
     }
     Ok((mounts, volume_ids))
+}
+
+async fn retain_legacy_transition_mounts(
+    api: &ApiImpl,
+    snapshot: &crate::snapshot::RunnableSnapshot,
+    context: &mut crate::sandbox::storage::StorageContext,
+    requested: &mut Option<HashMap<String, String>>,
+) -> Result<Vec<String>, models::Error> {
+    use crate::sandbox::storage::transition::{retained, MountRelocation, RETAINED_PREFIX};
+    let (inherited, ids) = restore_snapshot_volume_mounts(api, snapshot).await?;
+    let target = requested.get_or_insert_default();
+    for (source, name) in inherited {
+        let hidden = if retained(&source) {
+            source.clone()
+        } else {
+            use sha2::{Digest, Sha256};
+            let root = format!("{:x}", Sha256::digest(context.request_id.as_bytes()));
+            let path = format!("{:x}", Sha256::digest(source.as_bytes()));
+            let hidden = format!("{RETAINED_PREFIX}{}/legacy-{}", &root[..16], &path[..16]);
+            context.relocations.push(MountRelocation {
+                source: source.clone(),
+                target: hidden.clone(),
+            });
+            hidden
+        };
+        if target.insert(hidden, name).is_some() {
+            cleanup_volume_ids(&api.volume_manager, &ids).await;
+            return Err(ApiImpl::error(409, "retained legacy mount collision"));
+        }
+    }
+    Ok(ids)
 }
 
 impl From<SandboxTimeoutAction> for models::SandboxOnTimeout {
@@ -350,7 +497,10 @@ impl From<SandboxMetadata> for models::ListedSandbox {
             metadata: m.user_metadata,
             state: m.state.into(),
             envd_version: m.runtime_versions.envd_version.clone(),
-            volume_mounts: Some(volume_mounts_model(&m.volume_mounts)),
+            volume_mounts: Some(volume_mounts_with_storage(
+                &m.volume_mounts,
+                m.storage_context.as_ref(),
+            )),
         }
     }
 }
@@ -442,7 +592,10 @@ impl From<SandboxMetadata> for models::SandboxDetail {
                 auto_resume: m.auto_resume,
                 on_timeout: m.timeout_action.into(),
             }),
-            volume_mounts: Some(volume_mounts_model(&m.volume_mounts)),
+            volume_mounts: Some(volume_mounts_with_storage(
+                &m.volume_mounts,
+                m.storage_context.as_ref(),
+            )),
         }
     }
 }
@@ -810,12 +963,13 @@ impl Sandboxes<()> for ApiImpl {
                 .await
                 {
                     let _ = self.orchestrator.delete_sandbox(metadata.id).await;
-                    if let Some(owner) = pending_volume_owner.as_deref() {
-                        let _ = self
-                            .volume_manager
-                            .replace_owner_for(owner, None, &reserved_volume_ids)
-                            .await;
-                    }
+                    let _ = finish_volume_reservation(
+                        &self.volume_manager,
+                        pending_volume_owner.as_deref(),
+                        None,
+                        &reserved_volume_ids,
+                    )
+                    .await;
                     return Ok(SandboxesColdPostResponse::Status500_ServerError(
                         Self::error(
                             500,
@@ -962,10 +1116,14 @@ impl Sandboxes<()> for ApiImpl {
         body: &models::NewSandbox,
     ) -> Result<SandboxesPostResponse, ()> {
         let timer = SandboxStageTimer::new("create_warm");
+        let pinned_template = crate::sandbox::storage::current_context()
+            .map(|c| c.template_pin)
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| body.template_id.clone());
         let snapshot = match timer
             .time(
                 "load_snapshot",
-                self.snapshot_manager.load_runnable(&body.template_id),
+                self.snapshot_manager.load_runnable(&pinned_template),
             )
             .await
         {
@@ -1008,7 +1166,7 @@ impl Sandboxes<()> for ApiImpl {
 
         let extra_drives_in_snapshot =
             body.volume_mounts.is_none() && !snapshot.committed().volume_snapshots.is_empty();
-        let (requested_volume_mounts, restored_volume_ids) = if let Some(mounts) =
+        let (mut requested_volume_mounts, mut restored_volume_ids) = if let Some(mounts) =
             body.volume_mounts.as_deref()
         {
             let mounts = match volume_mounts_from_model(Some(mounts)) {
@@ -1029,6 +1187,23 @@ impl Sandboxes<()> for ApiImpl {
                 }
             }
         };
+        let mut launch_storage = crate::sandbox::storage::current_context();
+        if let Some(context) = launch_storage
+            .as_mut()
+            .filter(|context| context.replace_mounts)
+        {
+            match retain_legacy_transition_mounts(
+                self,
+                &snapshot,
+                context,
+                &mut requested_volume_mounts,
+            )
+            .await
+            {
+                Ok(ids) => restored_volume_ids.extend(ids),
+                Err(error) => return Ok(SandboxesPostResponse::Status409_Conflict(error)),
+            }
+        }
         let PreparedVolumeMounts {
             owner: pending_volume_owner,
             drives: volume_drives,
@@ -1068,7 +1243,13 @@ impl Sandboxes<()> for ApiImpl {
         };
 
         match timer
-            .time("create_sandbox", self.orchestrator.create_sandbox(request))
+            .time(
+                "create_sandbox",
+                crate::sandbox::storage::scope(
+                    launch_storage,
+                    self.orchestrator.create_sandbox(request),
+                ),
+            )
             .await
         {
             Ok(metadata) => {
@@ -1081,12 +1262,13 @@ impl Sandboxes<()> for ApiImpl {
                 .await
                 {
                     let _ = self.orchestrator.delete_sandbox(metadata.id).await;
-                    if let Some(owner) = pending_volume_owner.as_deref() {
-                        let _ = self
-                            .volume_manager
-                            .replace_owner_for(owner, None, &reserved_volume_ids)
-                            .await;
-                    }
+                    let _ = finish_volume_reservation(
+                        &self.volume_manager,
+                        pending_volume_owner.as_deref(),
+                        None,
+                        &reserved_volume_ids,
+                    )
+                    .await;
                     cleanup_volume_ids(&self.volume_manager, &restored_volume_ids).await;
                     return Ok(SandboxesPostResponse::Status500_ServerError(Self::error(
                         500,
@@ -1390,7 +1572,8 @@ impl Sandboxes<()> for ApiImpl {
                 Self::error(400, "count must be between 1 and 100"),
             ));
         }
-        if !source_metadata.volume_mounts.is_empty() {
+        let provider_fork = source_metadata.storage_context.is_some();
+        if !provider_fork && !source_metadata.volume_mounts.is_empty() {
             if let Err(error) = self.orchestrator.snapshot_volume_mounts(sandbox_id).await {
                 return Ok(SandboxesSandboxIdForkPostResponse::Status500_ServerError(
                     error.into(),
@@ -1416,29 +1599,30 @@ impl Sandboxes<()> for ApiImpl {
                 ));
             }
         }
-        let (child_specs, child_volume_ids) = if source_metadata.volume_mounts.is_empty() {
-            (
-                (0..count)
-                    .map(|_| SandboxForkChildSpec {
-                        sandbox_id: SandboxId::new(),
-                        ..Default::default()
-                    })
-                    .collect(),
-                HashMap::new(),
-            )
-        } else {
-            match prepare_volume_fork_specs(self, &source_metadata, count).await {
-                Ok(specs) => specs,
-                Err(error) => {
-                    return Ok(match error.code {
-                        404 => SandboxesSandboxIdForkPostResponse::Status404_NotFound(error),
-                        409 => SandboxesSandboxIdForkPostResponse::Status409_Conflict(error),
-                        500 => SandboxesSandboxIdForkPostResponse::Status500_ServerError(error),
-                        _ => SandboxesSandboxIdForkPostResponse::Status400_BadRequest(error),
-                    });
+        let (child_specs, child_volume_ids) =
+            if provider_fork || source_metadata.volume_mounts.is_empty() {
+                (
+                    (0..count)
+                        .map(|_| SandboxForkChildSpec {
+                            sandbox_id: SandboxId::new(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    HashMap::new(),
+                )
+            } else {
+                match prepare_volume_fork_specs(self, &source_metadata, count).await {
+                    Ok(specs) => specs,
+                    Err(error) => {
+                        return Ok(match error.code {
+                            404 => SandboxesSandboxIdForkPostResponse::Status404_NotFound(error),
+                            409 => SandboxesSandboxIdForkPostResponse::Status409_Conflict(error),
+                            500 => SandboxesSandboxIdForkPostResponse::Status500_ServerError(error),
+                            _ => SandboxesSandboxIdForkPostResponse::Status400_BadRequest(error),
+                        });
+                    }
                 }
-            }
-        };
+            };
         let new_timeout = body
             .as_ref()
             .and_then(|body| body.timeout)
@@ -1447,11 +1631,25 @@ impl Sandboxes<()> for ApiImpl {
             });
         let timer = SandboxStageTimer::new("fork");
         match timer
-            .time(
-                "fork",
-                self.orchestrator
-                    .fork_sandbox_with_specs(sandbox_id, child_specs, new_timeout),
-            )
+            .time("fork", async {
+                if provider_fork {
+                    self.orchestrator
+                        .fork_sandbox_with_preparer(
+                            sandbox_id,
+                            child_specs,
+                            new_timeout,
+                            std::sync::Arc::new(super::storage_fork::StorageForkPreparer::new(
+                                source_metadata,
+                                std::sync::Arc::clone(&self.volume_manager),
+                            )),
+                        )
+                        .await
+                } else {
+                    self.orchestrator
+                        .fork_sandbox_with_specs(sandbox_id, child_specs, new_timeout)
+                        .await
+                }
+            })
             .await
         {
             Ok(outcomes) => {
@@ -1776,7 +1974,13 @@ impl Sandboxes<()> for ApiImpl {
             }
         };
 
-        let volume_snapshots = match snapshot_sandbox_volumes(self, &capture.metadata).await {
+        let volume_snapshots = match snapshot_sandbox_volumes(
+            self,
+            &capture.metadata,
+            capture.captured_snapshot.manifest(),
+        )
+        .await
+        {
             Ok(snapshots) => snapshots,
             Err(error) => {
                 return Ok(match error.code {

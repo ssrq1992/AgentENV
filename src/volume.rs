@@ -159,6 +159,27 @@ pub enum VolumeError {
     Storage(String),
 }
 
+#[derive(Serialize, Deserialize)]
+struct PrivateReservationCleanup {
+    owner: String,
+    volumes: Vec<String>,
+    context: crate::sandbox::storage::StorageContext,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PrivateVolumeCleanup {
+    version: u32,
+    id: String,
+    name: String,
+    context: crate::sandbox::storage::StorageContext,
+    created: bool,
+    #[serde(default = "private_cleanup_default")]
+    private: bool,
+}
+fn private_cleanup_default() -> bool {
+    true
+}
+
 #[derive(Clone)]
 pub struct VolumeManager {
     records: Arc<RwLock<HashMap<String, VolumeRecord>>>,
@@ -501,6 +522,39 @@ impl VolumeManager {
         size_mb: u64,
         backing_layers: Vec<OverlaybdLayerRef>,
     ) -> Result<VolumeRecord, VolumeError> {
+        self.create_snapshot_volume_scoped(name, mode, size_mb, backing_layers, None, false)
+            .await
+    }
+
+    pub(crate) async fn create_consumer_snapshot_volume(
+        &self,
+        name: String,
+        mode: VolumeMode,
+        size_mb: u64,
+        backing_layers: Vec<OverlaybdLayerRef>,
+        context: &crate::sandbox::storage::StorageContext,
+        private: bool,
+    ) -> Result<VolumeRecord, VolumeError> {
+        self.create_snapshot_volume_scoped(
+            name,
+            mode,
+            size_mb,
+            backing_layers,
+            Some(context),
+            private,
+        )
+        .await
+    }
+
+    async fn create_snapshot_volume_scoped(
+        &self,
+        name: String,
+        mode: VolumeMode,
+        size_mb: u64,
+        backing_layers: Vec<OverlaybdLayerRef>,
+        context: Option<&crate::sandbox::storage::StorageContext>,
+        private: bool,
+    ) -> Result<VolumeRecord, VolumeError> {
         validate_name(&name)?;
         if size_mb == 0 || backing_layers.is_empty() {
             return Err(VolumeError::InvalidSize);
@@ -534,10 +588,25 @@ impl VolumeManager {
             size_mb = record.size_mb,
             "creating volume from snapshot"
         );
+        let mut cleanup = context.map(|context| PrivateVolumeCleanup {
+            version: 1,
+            id: record.id.clone(),
+            name: record.name.clone(),
+            context: context.clone(),
+            created: false,
+            private,
+        });
+        if let Some(task) = cleanup.as_ref() {
+            self.persist_private_volume_cleanup(task)?;
+        }
         self.repository
             .create_volume(record.clone())
             .await
             .map_err(repository_error)?;
+        if let Some(task) = cleanup.as_mut() {
+            task.created = true;
+            self.persist_private_volume_cleanup(task)?;
+        }
         self.cache_record(record.clone()).await;
         info!(
             volume_id = %record.id,
@@ -546,6 +615,196 @@ impl VolumeManager {
             "volume created from snapshot"
         );
         Ok(record)
+    }
+
+    pub(crate) fn persist_storage_reservation_cleanup(
+        &self,
+        context: &crate::sandbox::storage::StorageContext,
+        owner: &str,
+        volumes: &[String],
+    ) -> Result<(), VolumeError> {
+        use std::io::Write;
+        let task = PrivateReservationCleanup {
+            owner: owner.to_owned(),
+            volumes: volumes.to_vec(),
+            context: context.clone(),
+        };
+        let result = (|| -> anyhow::Result<()> {
+            anyhow::ensure!(
+                is_valid_volume_component(&context.request_id),
+                "invalid provider request identity"
+            );
+            let root = self.root.join("internal-reservations");
+            std::fs::create_dir_all(&root)?;
+            std::fs::File::open(&self.root)?.sync_all()?;
+            let mut temporary = tempfile::NamedTempFile::new_in(&root)?;
+            temporary.write_all(&serde_json::to_vec(&task)?)?;
+            temporary.as_file().sync_all()?;
+            temporary
+                .persist(root.join(format!("{}.json", context.request_id)))
+                .map_err(|error| error.error)?;
+            std::fs::File::open(root)?.sync_all()?;
+            Ok(())
+        })();
+        result.map_err(|error| VolumeError::Storage(error.to_string()))
+    }
+
+    async fn reap_private_reservation(&self, path: &Path) -> anyhow::Result<()> {
+        let task: PrivateReservationCleanup = serde_json::from_slice(&std::fs::read(path)?)?;
+        anyhow::ensure!(
+            is_valid_volume_component(&task.context.request_id)
+                && path
+                    == self
+                        .root
+                        .join("internal-reservations")
+                        .join(format!("{}.json", task.context.request_id)),
+            "invalid reservation cleanup identity"
+        );
+        let status = task.context.control("cleanup.status").await?;
+        if status.get("terminal").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Ok(());
+        }
+        let mut existing = Vec::new();
+        for id in task.volumes {
+            match self.get(&id).await {
+                Ok(_) => existing.push(id),
+                Err(VolumeError::NotFound(_)) => (),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        // A failed create may still have written legacy data under its pending
+        // owner. Publish that stopped backing before clearing the reservation.
+        self.recover_and_publish_backings(&task.owner, &existing)
+            .await?;
+        self.replace_owner_for(&task.owner, None, &existing).await?;
+        std::fs::remove_file(path)?;
+        std::fs::File::open(self.root.join("internal-reservations"))?.sync_all()?;
+        Ok(())
+    }
+
+    fn persist_private_volume_cleanup(
+        &self,
+        task: &PrivateVolumeCleanup,
+    ) -> Result<(), VolumeError> {
+        use std::io::Write;
+        let result = (|| -> anyhow::Result<()> {
+            validate_volume_id(&task.id)?;
+            let root = self.root.join("internal-volumes");
+            std::fs::create_dir_all(&root)?;
+            std::fs::File::open(&self.root)?.sync_all()?;
+            let mut temporary = tempfile::NamedTempFile::new_in(&root)?;
+            temporary.write_all(&serde_json::to_vec(task)?)?;
+            temporary.as_file().sync_all()?;
+            temporary
+                .persist(root.join(format!("{}.json", task.id)))
+                .map_err(|error| error.error)?;
+            std::fs::File::open(root)?.sync_all()?;
+            Ok(())
+        })();
+        result.map_err(|error| VolumeError::Storage(error.to_string()))
+    }
+
+    async fn reap_private_volume(&self, path: &Path) -> anyhow::Result<()> {
+        let task: PrivateVolumeCleanup = serde_json::from_slice(&std::fs::read(path)?)?;
+        validate_volume_id(&task.id)?;
+        anyhow::ensure!(
+            task.version == 1
+                && path
+                    == self
+                        .root
+                        .join("internal-volumes")
+                        .join(format!("{}.json", task.id)),
+            "invalid internal volume cleanup identity"
+        );
+        let status = task.context.control("cleanup.status").await?;
+        let exposed = status
+            .get("ever_ready")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && status.get("ephemeral").and_then(serde_json::Value::as_bool) == Some(false);
+        if !task.private && exposed {
+            std::fs::remove_file(path)?;
+            std::fs::File::open(self.root.join("internal-volumes"))?.sync_all()?;
+            return Ok(());
+        }
+        if status.get("terminal").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Ok(());
+        }
+        match self.get(&task.id).await {
+            Ok(record) => {
+                anyhow::ensure!(record.name == task.name, "internal volume identity changed");
+                if record.reserved_by_sandbox_id.is_some() || !record.read_only_mounts.is_empty() {
+                    return Ok(());
+                }
+                let mut observed = task;
+                observed.created = true;
+                self.persist_private_volume_cleanup(&observed)?;
+                self.delete(&record.id).await?;
+            }
+            Err(VolumeError::NotFound(_)) if task.created => (),
+            Err(VolumeError::NotFound(_)) => return Ok(()), // unknown remote create may still complete
+            Err(error) => return Err(error.into()),
+        }
+        std::fs::remove_file(path)?;
+        std::fs::File::open(self.root.join("internal-volumes"))?.sync_all()?;
+        Ok(())
+    }
+
+    /// Reap runtime-owned retained legacy clones after provider-confirmed stop.
+    /// Public/default-inherited volumes have no cleanup task and are preserved.
+    pub fn start_internal_volume_gc(&self) {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tick.tick().await;
+                if let Ok(entries) = std::fs::read_dir(manager.root.join("internal-reservations")) {
+                    for entry in entries {
+                        let Ok(entry) = entry else {
+                            continue;
+                        };
+                        if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                            if let Err(error) =
+                                manager.reap_private_reservation(&entry.path()).await
+                            {
+                                debug!(%error, "native legacy reservation cleanup deferred");
+                            }
+                        }
+                    }
+                }
+                let Ok(entries) = std::fs::read_dir(manager.root.join("internal-volumes")) else {
+                    continue;
+                };
+                for entry in entries {
+                    let Ok(entry) = entry else {
+                        continue;
+                    };
+                    if entry.file_type().is_ok_and(|kind| kind.is_file())
+                        && entry
+                            .path()
+                            .extension()
+                            .is_some_and(|extension| extension == "json")
+                    {
+                        if let Err(error) = manager.reap_private_volume(&entry.path()).await {
+                            debug!(%error,"retained legacy volume cleanup deferred");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Publish exactly the immutable config saved inside a joint capture.
+    /// This must not update the live volume catalog or re-read its current head.
+    pub(crate) async fn publish_captured_backing(
+        &self,
+        volume_id: &str,
+        image_config_path: &Path,
+    ) -> Result<Vec<OverlaybdLayerRef>, VolumeError> {
+        self.repository
+            .publish_volume_backing(volume_id, image_config_path)
+            .await
+            .map_err(repository_error)
     }
 
     pub(crate) async fn snapshot_volume_state(
@@ -1012,6 +1271,37 @@ mod tests {
             ..LayerConfig::default()
         });
         std::fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn captured_backing_does_not_follow_or_rewind_the_live_volume_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = manager_at(temp.path()).await;
+        let parent = published_volume(temp.path(), &manager).await;
+        manager.reserve(&parent.id, "source-run").await.unwrap();
+        let captured_config = temp.path().join("captured-volume.json");
+        std::fs::copy(
+            parent.backing_image_config.as_ref().unwrap(),
+            &captured_config,
+        )
+        .unwrap();
+        append_local_layer(&parent);
+        manager
+            .recover_and_publish_backings("source-run", std::slice::from_ref(&parent.id))
+            .await
+            .unwrap();
+        let advanced = manager.get(&parent.id).await.unwrap();
+        assert!(advanced.backing_layers.len() > parent.backing_layers.len());
+
+        let captured = manager
+            .publish_captured_backing(&parent.id, &captured_config)
+            .await
+            .unwrap();
+        assert_eq!(captured, parent.backing_layers);
+        assert_eq!(
+            manager.get(&parent.id).await.unwrap().backing_layers,
+            advanced.backing_layers
+        );
     }
 
     #[tokio::test]

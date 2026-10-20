@@ -1,0 +1,20 @@
+{
+  "Listen": ":9443",
+  "HealthListen": ":9093",
+  "Root": "/var/lib/ssf",
+  "PlanPublicKey": "/etc/agentenv-storage/plan.pub",
+  "Cert": "/etc/ssf-node-tls/tls.crt",
+  "Key": "/etc/ssf-node-tls/tls.key",
+  "CA": "/etc/ssf-node-tls/ca.crt",
+  "AllowedPeers": [
+    "spiffe://ssf/agentenv/node"
+  ],
+  "EvidenceEndpoint": "https://127.0.0.1:9444/v1/evidence",
+  "Drivers": [
+    {
+      "Name": "example.csi.driver",
+      "NodeEndpoint": "unix:///var/lib/kubelet/plugins/example.csi.driver/csi.sock",
+      "Revision": "1"
+    }
+  ]
+}

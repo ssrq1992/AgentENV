@@ -235,6 +235,10 @@ fn fallback_to_object_storage_would_mix_sources(
 
 #[async_trait]
 impl SnapshotRepository for OssSnapshotRepository {
+    async fn storage_identity(&self) -> RepositoryResult<String> {
+        Ok(self.client.storage_identity())
+    }
+
     async fn create(&self, record: SnapshotRecord) -> RepositoryResult<SnapshotRecord> {
         if !matches!(record.source, SnapshotSource::Template { .. }) {
             return Err(RepositoryError::InvalidRequest {
@@ -390,6 +394,7 @@ impl SnapshotRepository for OssSnapshotRepository {
 
             // 4. Construct committed CommittedSnapshot.
             let committed = CommittedSnapshot {
+                storage_checkpoint: manifest.storage_checkpoint.clone(),
                 context: metadata.context.clone(),
                 startup: metadata.startup.clone(),
                 runtime_versions: metadata.runtime_versions.clone(),

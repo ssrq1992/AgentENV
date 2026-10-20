@@ -1488,6 +1488,14 @@ components:
     Volume:
       type: object
       properties:
+        provider:
+          type: string
+          description: Storage provider identity; omitted by older servers. Legacy remains the default.
+        capabilities:
+          type: object
+          additionalProperties:
+            type: boolean
+          description: Storage capabilities currently available for this volume.
         volumeID:
           type: string
           description: ID of the volume
@@ -1512,9 +1520,29 @@ components:
         - sizeMB
         - status
 
+    ExpandVolume:
+      type: object
+      required: [sizeMB]
+      properties:
+        sizeMB:
+          type: integer
+          format: uint64
+          minimum: 1
+          description: Requested offline capacity in MiB; shrinking is forbidden.
+
     NewVolume:
       type: object
       properties:
+        provider:
+          type: string
+          description: Optional storage provider. Omitted or legacy uses the original volume manager.
+        storage:
+          type: object
+          additionalProperties: true
+          description: >-
+            Provider-specific storage options. SSF accepts namespace, storageClass,
+            snapshotClass and import (namespace, name, uid). Import never formats
+            an existing device. Provider failures never fall back to an empty legacy volume.
         name:
           type: string
           description: Name of the volume
@@ -2964,3 +2992,50 @@ paths:
           $ref: "#/components/responses/409"
         "500":
           $ref: "#/components/responses/500"
+
+  /volumes/{volumeID}/expand:
+    post:
+      summary: Expand a provider volume offline
+      description: Records an offline expansion intent. Running or paused consumers keep the request pending. Filesystem growth completes before the next VMM starts.
+      tags: [volumes]
+      security:
+        - ApiKeyAuth: []
+        - AuthProviderBearerAuth: []
+          AuthProviderTeamAuth: []
+        - AdminApiKeyAuth: []
+          AdminTeamAuth: []
+      parameters:
+        - $ref: "#/components/parameters/volumeID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExpandVolume"
+      responses:
+        "200":
+          description: Controller expansion complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Volume"
+        "202":
+          description: Offline expansion pending
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Volume"
+        "400":
+          $ref: "#/components/responses/400"
+        "401":
+          $ref: "#/components/responses/401"
+        "409":
+          $ref: "#/components/responses/409"
+        "500":
+          $ref: "#/components/responses/500"
+        "501":
+          description: Volume provider does not support offline expansion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"

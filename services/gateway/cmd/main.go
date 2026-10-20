@@ -18,6 +18,7 @@ import (
 	gateway "agentenv/services/gateway/internal"
 	"agentenv/services/shared/config"
 	"agentenv/services/shared/logging"
+	"agentenv/services/shared/storage"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -140,7 +141,15 @@ func main() {
 		queryOnlySchedulerClient = schedulerv1.NewSchedulerClient(queryOnlyConn)
 	}
 
+	var storageKey []byte
+	if path := os.Getenv("AENV_STORAGE_KEY_FILE"); path != "" {
+		storageKey, err = storage.LoadKey(path)
+		if err != nil {
+			logger.Fatal("load storage key failed", zap.Error(err))
+		}
+	}
 	s, err := gateway.NewServer(logger, schedulerClient, gateway.ServerOptions{
+		StorageKey:               storageKey,
 		RequestTimeout:           cfg.Gateway.RequestTimeout,
 		MaxResponseSize:          cfg.Gateway.ForwardResponseSize,
 		APIKey:                   apiKey,

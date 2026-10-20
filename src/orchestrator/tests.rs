@@ -5806,3 +5806,295 @@ async fn sandbox_metrics_failure_is_not_zero_and_paused_guests_are_not_polled() 
     assert_eq!(metadata.state, SandboxState::Paused);
     assert_eq!(metadata.expires_at, expiration);
 }
+
+#[tokio::test]
+async fn provider_context_preserves_native_pause_and_requires_child_admission() -> Result<()> {
+    setup();
+    let orchestrator = make_orchestrator().await;
+    let created = orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    let mut metadata = orchestrator.store.get(&created.id).await?.unwrap();
+    metadata.storage_context = Some(crate::sandbox::storage::StorageContext {
+        ticket: "test-ticket".into(),
+        owner_uid: "owner".into(),
+        run_uid: "run".into(),
+        request_id: "request".into(),
+        template_pin: String::new(),
+        checkpoint_source: String::new(),
+        managed_mounts: vec![crate::sandbox::storage::ManagedMount {
+            name: "data".into(),
+            path: "/data".into(),
+        }],
+        native_id: String::new(),
+        replace_mounts: false,
+        relocations: Vec::new(),
+    });
+    orchestrator.store.update(metadata).await?;
+    // Fork still needs a new compute reservation for every child, even without
+    // provider volumes. It cannot reuse the parent's ticket.
+    assert!(orchestrator
+        .fork_sandbox(created.id, 1, NewTimeout::UseExisting)
+        .await
+        .is_err());
+    orchestrator.pause_sandbox(created.id).await?;
+    let paused = orchestrator.store.get(&created.id).await?.unwrap();
+    assert_eq!(paused.state, SandboxState::Paused);
+    assert_eq!(paused.storage_context.unwrap().run_uid, "run");
+    Ok(())
+}
+
+#[tokio::test]
+async fn prepared_fork_keeps_independent_identity_and_partial_success() -> Result<()> {
+    use crate::sandbox::storage::StorageContext;
+    use crate::sandbox::{
+        ForkRuntimeMetadata, PreparedForkChild, SandboxForkPreparer, SandboxForkSpec,
+    };
+    struct Preparer {
+        parent: StorageContext,
+        failed: SandboxId,
+        unknown_stop: SandboxId,
+        cleaned: StdMutex<Vec<SandboxId>>,
+    }
+    #[async_trait]
+    impl SandboxForkPreparer for Preparer {
+        async fn prepare(
+            &self,
+            _: &crate::sandbox::SandboxSnapshotManifest,
+            spec: &SandboxForkSpec,
+        ) -> anyhow::Result<PreparedForkChild> {
+            anyhow::ensure!(
+                spec.sandbox_id != self.failed,
+                "injected child admission failure"
+            );
+            let mut context = self.parent.clone();
+            context.owner_uid = format!("owner-{}", spec.sandbox_id);
+            context.run_uid = format!("run-{}", spec.sandbox_id);
+            context.request_id = format!("request-{}", spec.sandbox_id);
+            Ok(PreparedForkChild {
+                spec: spec.clone(),
+                metadata: ForkRuntimeMetadata {
+                    failed_start: (spec.sandbox_id == self.unknown_stop)
+                        .then(|| "injected failed launch and unknown stop".into()),
+                    storage_context: context,
+                    volume_mounts: HashMap::from([(
+                        "/legacy".into(),
+                        format!("child-volume-{}", spec.sandbox_id),
+                    )]),
+                },
+            })
+        }
+        async fn cleanup_failed(&self, child: SandboxId) {
+            self.cleaned.lock().unwrap().push(child);
+        }
+    }
+    setup();
+    let orchestrator = make_orchestrator().await;
+    let source = orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    let parent = StorageContext {
+        ticket: "parent-ticket".into(),
+        owner_uid: "parent-owner".into(),
+        run_uid: "parent-run".into(),
+        request_id: "parent-request".into(),
+        template_pin: String::new(),
+        checkpoint_source: String::new(),
+        managed_mounts: Vec::new(),
+        native_id: String::new(),
+        replace_mounts: false,
+        relocations: Vec::new(),
+    };
+    let mut metadata = source.clone();
+    metadata.storage_context = Some(parent.clone());
+    orchestrator.store.update(metadata).await?;
+    let ids = [
+        SandboxId::new(),
+        SandboxId::new(),
+        SandboxId::new(),
+        SandboxId::new(),
+    ];
+    let preparer = Arc::new(Preparer {
+        parent,
+        failed: ids[1],
+        unknown_stop: ids[3],
+        cleaned: StdMutex::new(Vec::new()),
+    });
+    let outcomes = orchestrator
+        .fork_sandbox_with_preparer(
+            source.id,
+            ids.iter()
+                .map(|id| SandboxForkChildSpec {
+                    sandbox_id: *id,
+                    ..Default::default()
+                })
+                .collect(),
+            NewTimeout::UseExisting,
+            preparer.clone(),
+        )
+        .await?;
+    assert_eq!(outcomes.len(), 4);
+    for (index, outcome) in outcomes.iter().enumerate() {
+        if index == 1 || index == 3 {
+            assert!(outcome.is_err());
+            continue;
+        }
+        let child = outcome.as_ref().unwrap();
+        assert_eq!(child.id, ids[index]);
+        assert_eq!(child.state, SandboxState::Running);
+        assert_eq!(
+            child.storage_context.as_ref().unwrap().owner_uid,
+            format!("owner-{}", child.id)
+        );
+        assert_eq!(
+            child.volume_mounts["/legacy"],
+            format!("child-volume-{}", child.id)
+        );
+    }
+    assert_eq!(*preparer.cleaned.lock().unwrap(), vec![ids[1]]);
+    let source_after = orchestrator.store.get(&source.id).await?.unwrap();
+    assert_eq!(source_after.state, SandboxState::Running);
+    assert_eq!(
+        source_after.storage_context.unwrap().owner_uid,
+        "parent-owner"
+    );
+    assert!(orchestrator.store.get(&ids[1]).await?.is_none());
+    let mut retained = orchestrator
+        .store
+        .get(&ids[3])
+        .await?
+        .expect("unknown child lost native ownership");
+    assert_eq!(retained.state, SandboxState::Killing);
+    assert_eq!(
+        retained.storage_context.as_ref().unwrap().owner_uid,
+        format!("owner-{}", ids[3])
+    );
+    assert!(orchestrator.sandboxes.read().await.contains_key(&ids[3]));
+    retained.storage_context = None;
+    orchestrator.store.update(retained).await?;
+    orchestrator.delete_sandbox(ids[3]).await?;
+    assert!(orchestrator.store.get(&ids[3]).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn fork_terminal_capture_keeps_ownership_when_stop_is_unknown() -> Result<()> {
+    setup();
+    let behavior = Arc::new(MockBehavior::new());
+    let orchestrator =
+        make_orchestrator_with_factory(MockBackendFactory::with_behavior(Arc::clone(&behavior)))
+            .await;
+    let source = orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    behavior.push_action(
+        MockOperation::Fork,
+        MockAction::FailTerminal {
+            message: "injected capture failure".into(),
+        },
+    );
+    behavior.push_action(
+        MockOperation::Stop,
+        MockAction::Fail {
+            message: "injected unknown stop outcome".into(),
+        },
+    );
+    assert!(orchestrator
+        .fork_sandbox(source.id, 1, NewTimeout::UseExisting)
+        .await
+        .is_err());
+    let retained = orchestrator
+        .store
+        .get(&source.id)
+        .await?
+        .expect("source ownership was removed without stop proof");
+    assert_eq!(retained.state, SandboxState::Killing);
+    assert!(orchestrator.sandboxes.read().await.contains_key(&source.id));
+    orchestrator.delete_sandbox(source.id).await?;
+    assert!(orchestrator.store.get(&source.id).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn storage_capacity_ids_match_allocations_and_exclude_dormant_builds() -> Result<()> {
+    setup();
+    let orchestrator = make_orchestrator().await;
+    let source = orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    let mut builder = source.clone();
+    builder.id = SandboxId::new();
+    builder.template_builder = true;
+    builder.state = SandboxState::Creating;
+    builder.resources.cpu_count = 2;
+    builder.resources.memory_mib = 512;
+    orchestrator.store.add(builder.clone()).await?;
+    let dormant = SandboxId::new();
+    orchestrator.register_template_build(dormant).await;
+    orchestrator.pause_sandbox(source.id).await?;
+    let (allocated, ids) = orchestrator.storage_allocation_snapshot().await?;
+    assert_eq!(ids, vec![builder.id]);
+    assert_eq!(allocated.allocated_cpu, 2);
+    assert_eq!(allocated.allocated_memory_bytes, 512 * 1024 * 1024);
+    let routing = orchestrator.list_sandbox_ids().await?;
+    assert!(routing.contains(&source.id) && routing.contains(&dormant));
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_failed_launch_keeps_native_handle_until_confirmed_stop() -> Result<()> {
+    setup();
+    for stage in [MockOperation::StartNowait, MockOperation::WaitForReady] {
+        let behavior = Arc::new(MockBehavior::new());
+        behavior.push_action(
+            stage,
+            MockAction::Fail {
+                message: "launch failed".into(),
+            },
+        );
+        behavior.push_action(
+            MockOperation::Stop,
+            MockAction::Fail {
+                message: "stop unknown".into(),
+            },
+        );
+        let orchestrator = make_orchestrator_without_background_with_factory(
+            InMemoryMetadataStore::new(),
+            MockBackendFactory::with_behavior(behavior),
+        );
+        let id = SandboxId::new();
+        let mut plan = create_launch_plan_with_resources(id);
+        let context = crate::sandbox::storage::StorageContext {
+            ticket: "ticket".into(),
+            owner_uid: "owner".into(),
+            run_uid: "run".into(),
+            request_id: "request".into(),
+            template_pin: String::new(),
+            checkpoint_source: String::new(),
+            managed_mounts: Vec::new(),
+            native_id: String::new(),
+            replace_mounts: false,
+            relocations: Vec::new(),
+        };
+        if let LaunchPlan::Create(create) = &mut plan {
+            create.launch_config.storage_context = Some(context.clone());
+            create.metadata.storage_context = Some(context);
+        }
+        assert!(orchestrator.launch_sandbox(plan).await.is_err());
+        let mut retained = orchestrator
+            .store
+            .get(&id)
+            .await?
+            .expect("failed native VM ownership disappeared");
+        assert_eq!(retained.state, SandboxState::Killing);
+        assert!(orchestrator.sandboxes.read().await.contains_key(&id));
+        // The mock has no provider transport. Remove only that transport before
+        // exercising the original native stop retry on the retained handle.
+        retained.storage_context = None;
+        orchestrator.store.update(retained).await?;
+        orchestrator.delete_sandbox(id).await?;
+        assert!(orchestrator.store.get(&id).await?.is_none());
+        assert!(!orchestrator.sandboxes.read().await.contains_key(&id));
+    }
+    Ok(())
+}

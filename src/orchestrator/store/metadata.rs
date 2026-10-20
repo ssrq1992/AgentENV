@@ -57,6 +57,8 @@ pub struct SandboxMetadata {
     /// unless overridden at create time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_extension_params: Option<CustomExtensionParams>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_context: Option<crate::sandbox::storage::StorageContext>,
     /// Independently managed volume mounts keyed by guest path.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub volume_mounts: HashMap<String, String>,
@@ -96,6 +98,7 @@ impl Default for SandboxMetadata {
             image_configs: ImageConfigs::new(),
             user_metadata: None,
             network_policy: SandboxNetworkPolicy::default(),
+            storage_context: None,
             custom_extension_params: None,
             volume_mounts: HashMap::new(),
             secure: false,

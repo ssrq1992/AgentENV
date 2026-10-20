@@ -79,6 +79,18 @@ pub(crate) struct OssClient {
 }
 
 impl OssClient {
+    pub(crate) fn storage_identity(&self) -> String {
+        let descriptor = serde_json::json!([
+            "oss",
+            self.operator_config.endpoint,
+            self.operator_config.bucket,
+            self.prefix
+        ]);
+        crate::digest::sha256_digest(descriptor.to_string().as_bytes())
+            .trim_start_matches("sha256:")
+            .to_owned()
+    }
+
     pub(crate) fn new(
         bucket: String,
         endpoint: String,

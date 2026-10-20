@@ -125,6 +125,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .await?,
     );
+    if config.storage_provider.enabled {
+        volume_manager.start_internal_volume_gc();
+    }
     let factory = FirecrackerSandboxFactory::with_cpu_config(Arc::clone(&cluster_cpu_arc));
     let orchestrator = Orchestrator::with_file_backed_store_factory_and_volumes(
         factory,

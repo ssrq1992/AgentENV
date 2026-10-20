@@ -684,3 +684,16 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod retained_storage_tests {
+    #[test]
+    fn retained_filesystems_keep_native_control_paths_available() {
+        let path = std::path::PathBuf::from(format!(
+            "{}request/data",
+            crate::sandbox::storage::transition::RETAINED_PREFIX
+        ));
+        assert!(super::normalize_mount_path(path).is_ok());
+        assert!(super::normalize_mount_path("/run/retained/data".into()).is_err());
+    }
+}
