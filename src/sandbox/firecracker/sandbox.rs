@@ -1106,9 +1106,13 @@ fi
 if [ "$replace" = 1 ] || ! "$BB" mountpoint -q "$target"; then
     "$BB" mount -t ext4 -o "$opts" "/dev/$dev" "$target"
 fi
+# A replacement mounts the new device over the frozen guest's existing mount,
+# so /proc/mounts lists two entries for the target path: the old device first,
+# the new device last. Only the last entry is the visible mount, so verify it
+# instead of rejecting every entry whose source differs from the new device.
 "$BB" awk -v t="$target" -v d="/dev/$dev" -v ro="$readonly" '
- $2==t { if ($1!=d || $3!="ext4") exit 2; n=split($4,a,","); for(i=1;i<=n;i++) if(a[i]==(ro==1?"ro":"rw")) ok=1 }
- END {if(!ok) exit 3}' /proc/mounts
+ $2==t { seen=1; mdev=$1; mfs=$3; ok=0; n=split($4,a,","); for(i=1;i<=n;i++) if(a[i]==(ro==1?"ro":"rw")) ok=1 }
+ END { if (!seen) exit 3; if (mdev!=d || mfs!="ext4") exit 2; if (!ok) exit 3 }' /proc/mounts
 "#;
             let envd = envd.clone();
             let args = vec![
@@ -1116,7 +1120,7 @@ fi
                 "-c".into(),
                 script.into(),
                 "--".into(),
-                device,
+                device.clone(),
                 d.guest_path.to_string_lossy().into_owned(),
                 d.uuid.clone(),
                 (d.bytes / 512).to_string(),
@@ -1144,7 +1148,10 @@ fi
             .await??;
             anyhow::ensure!(
                 output.exit_code == 0,
-                "external guest mount verification failed: {}",
+                "external guest mount verification failed for {} at {} (exit {}): {}",
+                device,
+                d.guest_path.display(),
+                output.exit_code,
                 output.stderr
             );
         }
