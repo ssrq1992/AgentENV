@@ -755,14 +755,17 @@ func isDataPlaneRouteSource(routeSource routeSource) bool {
 // to the /proxy sub-tree on the upstream, while control-plane and scheduled
 // requests are forwarded as-is.
 func upstreamTargetPath(routeSource routeSource, originalPath string) string {
-	if isDataPlaneRouteSource(routeSource) {
+	// Requests that already carry the explicit /proxy prefix (node-side
+	// convention, also used by SDKs and the SSF E2E tools) are forwarded
+	// as-is; only unprefixed data-plane paths get the upstream prefix.
+	if isDataPlaneRouteSource(routeSource) && !isExplicitProxyPath(originalPath) {
 		return "/proxy" + originalPath
 	}
 	return originalPath
 }
 
 func upstreamTargetEscapedPath(routeSource routeSource, originalEscapedPath string) string {
-	if isDataPlaneRouteSource(routeSource) {
+	if isDataPlaneRouteSource(routeSource) && !isExplicitProxyPath(originalEscapedPath) {
 		return "/proxy" + originalEscapedPath
 	}
 	return originalEscapedPath
