@@ -276,7 +276,10 @@ func (n *Node) expandFilesystem(ctx context.Context, id string, d Device) error 
 	}
 	// Crash replay is non-destructive: e2fsck repairs only safe preen cases;
 	// resize2fs is idempotent and never creates or replaces a filesystem.
-	if _, err = commandValue(ctx, "e2fsck", "-p", d.Path); err != nil {
+	// -f is required: resize2fs rejects a filesystem whose journal was never
+	// replayed (e.g. after a hard VM kill), and preen alone skips that replay
+	// when the superblock looks clean, leaving expansion stuck forever.
+	if _, err = commandValue(ctx, "e2fsck", "-f", "-p", d.Path); err != nil {
 		var exit *exec.ExitError
 		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
 			return err
