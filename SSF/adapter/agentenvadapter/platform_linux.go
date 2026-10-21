@@ -171,13 +171,38 @@ func commandValue(ctx context.Context, name string, args ...string) (string, err
 	}
 	return strings.TrimSpace(string(b)), nil
 }
+
+// flockExclusive acquires the exclusive device flock, retrying while external
+// probes (udev blkid on freshly attached devices) hold a transient shared
+// lock. A bounded wait keeps orphaned-formatter detection intact.
+func flockExclusive(ctx context.Context, f *os.File, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	for {
+		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if ctx != nil {
+			if e := ctx.Err(); e != nil {
+				return e
+			}
+		}
+		if time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
 func verifyPreparationIdle(d Device) error {
 	f, err := os.Open(d.Path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err = flockExclusive(ctx, f, 15*time.Second); err != nil {
 		return fmt.Errorf("preparation process still holds device: %w", err)
 	}
 	return nil
@@ -218,7 +243,7 @@ func prepareFilesystem(ctx context.Context, id string, d Device, initialize, che
 		return "", e
 	}
 	defer device.Close()
-	if e = unix.Flock(int(device.Fd()), unix.LOCK_EX|unix.LOCK_NB); e != nil {
+	if e = flockExclusive(ctx, device, 15*time.Second); e != nil {
 		return "", fmt.Errorf("preparation device busy: %w", e)
 	}
 	var st unix.Stat_t
