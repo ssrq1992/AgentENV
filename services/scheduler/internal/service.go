@@ -23,6 +23,7 @@ type Service struct {
 	store         BindingStore
 	artifacts     ArtifactStore
 	resourceLimit *config.NodeResourceLimit
+	storage       ControlPlugin
 }
 
 func NewService(logger *zap.Logger, nodes NodeRegistry, strategy Strategy, store BindingStore, opts ...ServiceOption) *Service {
@@ -78,7 +79,7 @@ func (s *QueryOnlyService) LookupNode(_ context.Context, req *schedulerv1.Lookup
 	return lookupNode(s.logger, s.store, req)
 }
 
-func (s *Service) Schedule(_ context.Context, req *schedulerv1.ScheduleRequest) (resp *schedulerv1.ScheduleResponse, err error) {
+func (s *Service) Schedule(ctx context.Context, req *schedulerv1.ScheduleRequest) (resp *schedulerv1.ScheduleResponse, err error) {
 	start := time.Now()
 	defer func() {
 		recordSchedulerSchedule(s.strategy.Name(), start, err)
@@ -87,6 +88,14 @@ func (s *Service) Schedule(_ context.Context, req *schedulerv1.ScheduleRequest) 
 	discovered := s.nodes.Snapshot( /* allowLingering */ false)
 	rich := make([]RichNode, 0, len(discovered))
 	for _, n := range discovered {
+		if s.storage != nil {
+			observed, ok := s.nodes.GetObserved(n.ID, "", time.Now())
+			if !ok || observed.GetSnapshot().GetStatus() != schedulerv1.NodeStatus_NODE_STATUS_READY {
+				continue
+			}
+			rich = append(rich, RichNode{Node: n, Snapshot: observed.GetSnapshot(), SandboxIDs: append([]string(nil), observed.GetSandboxIds()...)})
+			continue
+		}
 		rich = append(rich, RichNode{
 			Node:     n,
 			Snapshot: s.nodes.PeekObserved(n.ID),
@@ -94,6 +103,12 @@ func (s *Service) Schedule(_ context.Context, req *schedulerv1.ScheduleRequest) 
 	}
 
 	eligible := FilterByResourceLimit(rich, s.resourceLimit)
+	if s.storage != nil {
+		return s.storage.Schedule(ctx, req, eligible, func(candidates []RichNode) (RichNode, error) { return s.strategy.Select(candidates, req.GetHint()) })
+	}
+	if len(req.GetStorageIntent()) != 0 {
+		return nil, status.Error(codes.FailedPrecondition, ErrStorageDisabled.Error())
+	}
 
 	node, selectErr := s.strategy.Select(eligible, req.GetHint())
 	if selectErr != nil {

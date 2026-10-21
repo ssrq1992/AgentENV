@@ -16,6 +16,7 @@ import (
 	"time"
 
 	schedulerv1 "agentenv/services/api/proto"
+	"agentenv/services/shared/storage"
 
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
@@ -45,6 +46,7 @@ const (
 )
 
 type ServerOptions struct {
+	StorageKey               []byte
 	APIKey                   string
 	RequestTimeout           time.Duration
 	MaxResponseSize          int64
@@ -54,6 +56,7 @@ type ServerOptions struct {
 }
 
 type Server struct {
+	storageKey         []byte
 	logger             *zap.Logger
 	scheduler          schedulerv1.SchedulerClient
 	queryOnlyScheduler schedulerv1.SchedulerClient
@@ -83,6 +86,7 @@ func NewServer(logger *zap.Logger, schedulerClient schedulerv1.SchedulerClient, 
 	}
 
 	return &Server{
+		storageKey:          append([]byte(nil), options.StorageKey...),
 		logger:              logger,
 		scheduler:           schedulerClient,
 		queryOnlyScheduler:  queryOnlyScheduler,
@@ -166,6 +170,7 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
+	stripStorageHeaders(r.Header)
 	websocket := isWebSocketRequest(r)
 	streaming := isStreamingRequest(r)
 	longLived := streaming || websocket
@@ -248,6 +253,11 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !hasSandbox {
+		intent, intentErr := s.storageIntent(r)
+		if intentErr != nil {
+			s.writeJSON(w, http.StatusBadRequest, map[string]any{"code": 400, "message": intentErr.Error()})
+			return
+		}
 		hint, err := buildScheduleHint(r)
 		if err != nil {
 			// this only happens it cannot read request body, so the request cannot continue
@@ -261,14 +271,30 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		rpcStart := time.Now()
 		resp, err := s.scheduler.Schedule(routingCtx, &schedulerv1.ScheduleRequest{
-			Hint: hint,
+			Hint:          hint,
+			StorageIntent: intent,
 		})
 		recordGatewaySchedulerRPC("Schedule", rpcStart, err)
 		if err != nil {
+			if len(intent) > 0 && status.Code(err) == codes.FailedPrecondition {
+				s.writeJSON(w, http.StatusConflict, map[string]any{"code": 409, "message": status.Convert(err).Message()})
+				return
+			}
 			s.writeSchedulerError(w, err)
 			return
 		}
 		node = resp.GetNode()
+		if len(resp.GetStorageDispatch()) > 0 {
+			encoded, e := encodeStorageDispatch(resp.GetStorageDispatch())
+			if e != nil {
+				s.writeJSON(w, http.StatusBadGateway, map[string]any{"code": 502, "message": e.Error()})
+				return
+			}
+			r.Header.Set(storage.ContextHeader, encoded)
+		} else if len(intent) > 0 {
+			s.writeJSON(w, http.StatusBadGateway, map[string]any{"code": 502, "message": "storage-enabled scheduler omitted dispatch"})
+			return
+		}
 	}
 
 	s.logger.Debug("gateway routed request",

@@ -112,9 +112,38 @@ impl SnapshotManager {
     pub async fn publish(
         &self,
         metadata: SnapshotPublishMetadata,
-        manifest: SandboxSnapshotManifest,
+        mut manifest: SandboxSnapshotManifest,
         recording: Option<crate::snapshot::StartupRecording>,
     ) -> crate::snapshot::RepositoryResult<SnapshotRecord> {
+        if let Some(checkpoint) = manifest.storage_checkpoint.as_ref() {
+            manifest.storage_checkpoint = Some(
+                crate::sandbox::storage::publish_checkpoint(
+                    checkpoint,
+                    &metadata.id.to_string(),
+                    &self.repository.storage_identity().await?,
+                )
+                .await
+                .map_err(|error| {
+                    crate::snapshot::RepositoryError::backend(
+                        "retain provider checkpoint before native publication",
+                        error,
+                    )
+                })?,
+            );
+        }
+        if manifest.storage_checkpoint.is_some() {
+            crate::sandbox::storage::repository::completion(
+                &self.repository.storage_identity().await?,
+                &metadata.id.to_string(),
+                "published",
+            )
+            .map_err(|error| {
+                crate::snapshot::RepositoryError::backend(
+                    "persist provider repository observation task",
+                    error,
+                )
+            })?;
+        }
         let publication = self
             .repository
             .publish_with_local_layers(metadata, manifest.clone(), recording)
@@ -129,7 +158,7 @@ impl SnapshotManager {
         metadata: SnapshotPublishMetadata,
         captured_snapshot: CapturedSandboxSnapshot,
     ) -> crate::snapshot::RepositoryResult<SnapshotRecord> {
-        let manifest = captured_snapshot.manifest().clone();
+        let mut manifest = captured_snapshot.manifest().clone();
 
         // Spawn the startup-manifest recording up front (a no-op task when
         // the feature is disabled): the throwaway recording VM overlaps the
@@ -139,6 +168,10 @@ impl SnapshotManager {
         // the whole continuation.
         let recording = captured_snapshot
             .downcast_artifacts_ref::<FirecrackerCaptureArtifacts>()
+            // A throwaway recorder is a new writer/compute consumer. Never
+            // reuse the parent's storage ticket or frozen CSI devices for it.
+            // Provider-backed recording requires its own clone admission.
+            .filter(|artifacts| artifacts.snapshot_config().common.storage_context.is_none())
             .map(|artifacts| {
                 let snapshot_config = artifacts.snapshot_config().clone();
                 let snapshot_dir = artifacts.snapshot_dir().to_path_buf();
@@ -148,6 +181,35 @@ impl SnapshotManager {
                 )
             });
 
+        if let Some(checkpoint) = manifest.storage_checkpoint.as_ref() {
+            manifest.storage_checkpoint = Some(
+                crate::sandbox::storage::publish_checkpoint(
+                    checkpoint,
+                    &metadata.id.to_string(),
+                    &self.repository.storage_identity().await?,
+                )
+                .await
+                .map_err(|error| {
+                    crate::snapshot::RepositoryError::backend(
+                        "retain provider checkpoint before native publication",
+                        error,
+                    )
+                })?,
+            );
+        }
+        if manifest.storage_checkpoint.is_some() {
+            crate::sandbox::storage::repository::completion(
+                &self.repository.storage_identity().await?,
+                &metadata.id.to_string(),
+                "published",
+            )
+            .map_err(|error| {
+                crate::snapshot::RepositoryError::backend(
+                    "persist provider repository observation task",
+                    error,
+                )
+            })?;
+        }
         let publication = self
             .repository
             .publish_with_local_layers(metadata, manifest.clone(), recording)
@@ -251,6 +313,10 @@ impl SnapshotManager {
             .await;
     }
 
+    pub(crate) async fn storage_repository_id(&self) -> anyhow::Result<String> {
+        Ok(self.repository.storage_identity().await?)
+    }
+
     /// Loads a snapshot record by id or alias.
     pub async fn get(
         &self,
@@ -280,15 +346,32 @@ impl SnapshotManager {
     /// Returns `Ok(())` on success. The operation is idempotent:
     /// if the snapshot does not exist, it is still considered success.
     pub async fn delete(&self, id_or_alias: impl AsRef<str>) -> anyhow::Result<()> {
-        self.repository
-            .delete(id_or_alias.as_ref())
-            .await
-            .with_context(|| {
-                format!(
-                    "delete snapshot '{}' through repository",
-                    id_or_alias.as_ref()
+        let mut deletion_id = id_or_alias.as_ref().to_owned();
+        if crate::cfg::ConfigManager::global_config()
+            .storage_provider
+            .enabled
+        {
+            if let Some(record) = self.repository.get(&deletion_id).await? {
+                deletion_id = record.id.to_string();
+                crate::sandbox::storage::repository::begin_delete(
+                    &self.repository.storage_identity().await?,
+                    &deletion_id,
                 )
-            })
+                .await?;
+            } else if uuid::Uuid::parse_str(&deletion_id).is_ok() {
+                crate::sandbox::storage::repository::begin_delete(
+                    &self.repository.storage_identity().await?,
+                    &deletion_id,
+                )
+                .await?;
+            }
+        }
+        self.repository.delete(&deletion_id).await.with_context(|| {
+            format!(
+                "delete snapshot '{}' through repository",
+                id_or_alias.as_ref()
+            )
+        })
     }
 
     /// Resolves an alias to its committed snapshot id.

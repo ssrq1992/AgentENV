@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentenv-scheduler
+spec:
+  template:
+    spec:
+      containers:
+        - name: scheduler
+          env:
+            - name: AENV_SSF_CONFIG
+              value: /etc/agentenv-ssf/control.json
+            - name: SSF_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: agentenv-storage-ledger
+                  key: url
+          volumeMounts:
+            - name: storage-config
+              mountPath: /etc/agentenv-ssf
+              readOnly: true
+            - name: storage-control-keys
+              mountPath: /etc/agentenv-storage
+              readOnly: true
+            - name: storage-control-tls
+              mountPath: /etc/agentenv-storage-tls
+              readOnly: true
+            - name: native-auth
+              mountPath: /etc/agentenv-native-auth
+              readOnly: true
+      volumes:
+        - name: storage-config
+          configMap:
+            name: agentenv-ssf-config
+        - name: storage-control-keys
+          secret:
+            secretName: agentenv-storage-control
+            defaultMode: 0400
+        - name: storage-control-tls
+          secret:
+            secretName: agentenv-storage-control-tls
+            defaultMode: 0400
+        - name: native-auth
+          secret:
+            secretName: agentenv-auth
+            defaultMode: 0400

@@ -34,6 +34,32 @@ struct PosixFileLockGuard {
 }
 
 impl PosixFsCatalogStore {
+    pub(crate) fn storage_identity(&self) -> RepositoryResult<String> {
+        let _guard = self
+            .acquire_catalog_lock(self.root.join(".storage-identity.lock"), "storage identity")?;
+        let path = self.root.join(".storage-identity.json");
+        let identity: String = match fs::read(&path) {
+            Ok(raw) => serde_json::from_slice(&raw)
+                .map_err(|error| RepositoryError::backend("decode repository identity", error))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let identity = uuid::Uuid::now_v7().to_string();
+                self.write_json(&path, &identity)?;
+                fs::File::open(&self.root)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|error| RepositoryError::backend("sync repository identity", error))?;
+                identity
+            }
+            Err(error) => return Err(RepositoryError::backend("read repository identity", error)),
+        };
+        uuid::Uuid::parse_str(&identity)
+            .map_err(|error| RepositoryError::backend("invalid repository identity", error))?;
+        Ok(
+            crate::digest::sha256_digest(format!("posix:{identity}").as_bytes())
+                .trim_start_matches("sha256:")
+                .to_owned(),
+        )
+    }
+
     /// Creates a catalog store rooted at the repository's durable POSIX directory.
     pub fn new(root: PathBuf) -> Self {
         Self { root }
@@ -1268,6 +1294,29 @@ mod tests {
         TemplateBuildStatus,
     };
     use crate::volume::{VolumeMode, VolumeRecord};
+
+    #[test]
+    fn repository_identity_is_durable_and_catalog_scoped() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        let catalog = PosixFsCatalogStore::new(first.path().to_path_buf());
+        let identity = catalog.storage_identity().unwrap();
+        assert_eq!(identity.len(), 64);
+        assert_eq!(
+            identity,
+            PosixFsCatalogStore::new(first.path().to_path_buf())
+                .storage_identity()
+                .unwrap()
+        );
+        assert_ne!(
+            identity,
+            PosixFsCatalogStore::new(second.path().to_path_buf())
+                .storage_identity()
+                .unwrap()
+        );
+        std::fs::write(first.path().join(".storage-identity.json"), b"invalid").unwrap();
+        assert!(catalog.storage_identity().is_err());
+    }
 
     #[test]
     fn build_cache_head_updates_are_atomic_across_catalog_instances() {

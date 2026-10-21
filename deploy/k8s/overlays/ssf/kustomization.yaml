@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: agentenv-system
+resources:
+  - ../../base
+  - rbac.yaml
+patches:
+  - path: gateway.yaml
+  - path: scheduler.yaml
+  - path: node.yaml
+configMapGenerator:
+  - name: agentenv-ssf-config
+    files:
+      - control.json=config/control.json
+      - node.json=config/node.json
+      - ssf-node.json=config/ssf-node.json
+generatorOptions:
+  disableNameSuffixHash: true
+images:
+  - name: agentenv-scheduler
+    newName: agentenv-scheduler-ssf
+    newTag: latest

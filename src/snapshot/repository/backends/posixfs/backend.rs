@@ -131,6 +131,7 @@ impl PosixFsSnapshotRepository {
     fn committed_snapshot(
         metadata: &SnapshotPublishMetadata,
         built: CollectedBuiltArtifacts,
+        storage_checkpoint: Option<serde_json::Value>,
     ) -> CommittedSnapshot {
         CommittedSnapshot {
             context: metadata.context.clone(),
@@ -145,6 +146,7 @@ impl PosixFsSnapshotRepository {
             memory_layers: built.memory_layers,
             disk_publications: Vec::new(),
             memory_startup: None,
+            storage_checkpoint,
         }
     }
 
@@ -198,7 +200,8 @@ impl PosixFsSnapshotRepository {
             }
         };
 
-        let committed = Self::committed_snapshot(&metadata, built);
+        let committed =
+            Self::committed_snapshot(&metadata, built, manifest.storage_checkpoint.clone());
         match self
             .catalog_store
             .commit_publish(&session, metadata, committed)
@@ -297,6 +300,14 @@ async fn finish_posix_startup_manifest(
 
 #[async_trait]
 impl SnapshotRepository for PosixFsSnapshotRepository {
+    async fn storage_identity(&self) -> RepositoryResult<String> {
+        let catalog = Arc::clone(&self.catalog_store);
+        run_repository_blocking("read repository identity", move || {
+            catalog.storage_identity()
+        })
+        .await
+    }
+
     async fn create(&self, record: SnapshotRecord) -> RepositoryResult<SnapshotRecord> {
         let repository = self.clone();
         run_repository_blocking("create snapshot record", move || {
@@ -692,7 +703,9 @@ mod tests {
         let repository = backend.repository();
         let resolver = backend.runtime_resolver();
         let snapshot_id = SnapshotId::generate();
-        let local_artifacts = seed_built_snapshot(tempdir.path());
+        let mut local_artifacts = seed_built_snapshot(tempdir.path());
+        local_artifacts.storage_checkpoint =
+            Some(serde_json::json!({"reference":"provider-checkpoint"}));
         let metadata = sample_metadata(snapshot_id, Some("mvp"));
         let stored = repository
             .publish(metadata, local_artifacts, None)
@@ -705,11 +718,19 @@ mod tests {
             .expect("get should work")
             .expect("snapshot should exist");
         assert_eq!(stored.id, fetched.id);
+        assert_eq!(
+            fetched.committed.as_ref().unwrap().storage_checkpoint,
+            Some(serde_json::json!({"reference":"provider-checkpoint"}))
+        );
 
         let runnable = resolver
             .resolve(Arc::new(fetched))
             .await
             .expect("resolve should work");
+        assert_eq!(
+            runnable.manifest().storage_checkpoint,
+            runnable.committed().storage_checkpoint
+        );
         assert!(runnable.manifest().rootfs.image_config_path.exists());
         assert!(runnable.manifest().vm_state.path.exists());
         assert!(runnable.manifest().memory.image_config_path.exists());
@@ -1094,6 +1115,7 @@ mod tests {
             disk_publications: Vec::new(),
             custom_extension_params: None,
             memory_startup: None,
+            storage_checkpoint: None,
         };
         let snapshot = Arc::new(ready_record(metadata, committed));
 
@@ -1153,6 +1175,7 @@ mod tests {
             disk_publications: Vec::new(),
             custom_extension_params: None,
             memory_startup: None,
+            storage_checkpoint: None,
         };
         let snapshot = Arc::new(ready_record(metadata, committed));
 

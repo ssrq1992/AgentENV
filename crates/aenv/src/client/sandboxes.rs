@@ -1,4 +1,4 @@
-use super::{handle_status, Client};
+use super::{Client, handle_status};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -7,8 +7,35 @@ use std::time::Duration;
 
 #[derive(Debug, Serialize)]
 pub struct SandboxVolumeMount {
-    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pvc: Option<SandboxPVCSource>,
     pub path: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SandboxPVCSource {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    pub name: String,
+}
+
+impl SandboxVolumeMount {
+    pub fn named(name: String, path: String) -> Self {
+        Self {
+            name: Some(name),
+            pvc: None,
+            path,
+        }
+    }
+    pub fn pvc(namespace: Option<String>, name: String, path: String) -> Self {
+        Self {
+            name: None,
+            pvc: Some(SandboxPVCSource { namespace, name }),
+            path,
+        }
+    }
 }
 
 fn volume_mounts_request(
@@ -17,7 +44,7 @@ fn volume_mounts_request(
     mounts.map(|mounts| {
         mounts
             .into_iter()
-            .map(|(path, name)| SandboxVolumeMount { name, path })
+            .map(|(path, name)| SandboxVolumeMount::named(name, path))
             .collect()
     })
 }
@@ -101,11 +128,20 @@ impl Client {
         timeout: Option<u32>,
         volume_mounts: Option<HashMap<String, String>>,
     ) -> Result<Sandbox> {
+        self.create_sandbox_with_mounts(template_id, timeout, volume_mounts_request(volume_mounts))
+    }
+
+    pub fn create_sandbox_with_mounts(
+        &self,
+        template_id: &str,
+        timeout: Option<u32>,
+        volume_mounts: Option<Vec<SandboxVolumeMount>>,
+    ) -> Result<Sandbox> {
         let body = NewSandbox {
             template_id,
             timeout,
             secure: true,
-            volume_mounts: volume_mounts_request(volume_mounts),
+            volume_mounts,
         };
         let resp = handle_status(self.post("/sandboxes").send_json(&body))?;
         let sandbox: Sandbox = resp.into_json()?;
@@ -122,6 +158,26 @@ impl Client {
         disk_size_mb: Option<u32>,
         volume_mounts: Option<HashMap<String, String>>,
     ) -> Result<Sandbox> {
+        self.create_cold_sandbox_with_mounts(
+            image,
+            timeout,
+            cpu_count,
+            memory_mb,
+            disk_size_mb,
+            volume_mounts_request(volume_mounts),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_cold_sandbox_with_mounts(
+        &self,
+        image: &str,
+        timeout: Option<u32>,
+        cpu_count: Option<u32>,
+        memory_mb: Option<u32>,
+        disk_size_mb: Option<u32>,
+        volume_mounts: Option<Vec<SandboxVolumeMount>>,
+    ) -> Result<Sandbox> {
         let body = NewColdSandbox {
             image,
             timeout,
@@ -129,7 +185,7 @@ impl Client {
             memory_mb,
             disk_size_mb,
             secure: true,
-            volume_mounts: volume_mounts_request(volume_mounts),
+            volume_mounts,
         };
         let resp = handle_status(self.post("/sandboxes-cold").send_json(&body))?;
         let sandbox: Sandbox = resp.into_json()?;

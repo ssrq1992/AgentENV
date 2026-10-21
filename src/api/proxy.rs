@@ -2120,7 +2120,7 @@ mod tests {
         }))
         .expect("volumeMounts array should deserialize");
         let mount = &request.volume_mounts.unwrap()[0];
-        assert_eq!(mount.name, "vol_123");
+        assert_eq!(mount.name.as_deref(), Some("vol_123"));
         assert_eq!(mount.path, "/mnt/data");
     }
 

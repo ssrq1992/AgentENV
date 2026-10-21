@@ -17,8 +17,8 @@ use crate::image::cache::{
 use crate::sandbox::{
     CustomExtensionClient, CustomExtensionParams, EnvdAccessToken, FirecrackerSandboxFactory,
     FreshSandboxBuildSpec, PausedSandboxState, RuntimeArtifactSet, SandboxAccessTokenGenerator,
-    SandboxBackend, SandboxBackendFactory, SandboxCaptureError, SandboxForkSpec,
-    SandboxLaunchConfig, SandboxNetworkPolicy, SandboxRuntimeInfo,
+    SandboxBackend, SandboxBackendFactory, SandboxCaptureError, SandboxForkPreparer,
+    SandboxForkSpec, SandboxLaunchConfig, SandboxNetworkPolicy, SandboxRuntimeInfo,
 };
 use crate::snapshot::SnapshotRuntimeVersions;
 use crate::types::{bytes_to_mib_ceil, SandboxId, SandboxResources};
@@ -346,6 +346,13 @@ where
     }
 
     async fn finalize_terminal_volumes(&self, metadata: &SandboxMetadata) {
+        if let Some(context) = &metadata.storage_context {
+            // control() records a local durable task before transport. The
+            // provider can complete cleanup after this runtime exits.
+            if let Err(error) = context.control("delete").await {
+                warn!(sandbox_id = %metadata.id, %error, "terminal storage cleanup remains pending");
+            }
+        }
         let Some(manager) = self.volume_manager.as_ref() else {
             return;
         };
@@ -417,14 +424,59 @@ where
     /// This call only returns after the sandbox is fully ready and persisted
     /// as `Running`, so callers can treat a successful return as immediately
     /// usable without additional polling.
+    async fn reject_uncoordinated_storage_capture(&self, id: SandboxId) -> Result<()> {
+        if let Some(metadata) = self.store.get(&id).await? {
+            if metadata
+                .storage_context
+                .as_ref()
+                .is_some_and(|context| !context.managed_mounts.is_empty())
+            {
+                return Err(OrchestratorError::InternalError(
+                    "storage lifecycle barrier is not yet available for this operation".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn reject_external_fork(&self, id: SandboxId) -> Result<()> {
+        self.reject_uncoordinated_storage_capture(id).await?;
+        if self
+            .store
+            .get(&id)
+            .await?
+            .is_some_and(|metadata| metadata.storage_context.is_some())
+        {
+            return Err(OrchestratorError::InternalError(
+                "provider fork requires separate compute and storage admission for each child"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn create_sandbox(
         self: &Arc<Self>,
         request: CreateSandboxRequest,
     ) -> Result<SandboxMetadata> {
+        let storage_context = crate::sandbox::storage::current_context();
+        if let Some(existing) = storage_context.as_ref().filter(|c| !c.native_id.is_empty()) {
+            let id = SandboxId::parse_str(&existing.native_id)
+                .map_err(|e| OrchestratorError::InternalError(e.to_string()))?;
+            if let Some(metadata) = self.get_sandbox(&id).await? {
+                if matches!(metadata.state, SandboxState::Running) {
+                    return Ok(metadata);
+                }
+            }
+            return Err(OrchestratorError::InternalError(
+                "native storage launch already associated; reconciliation pending".into(),
+            ));
+        }
         let sandbox_id = SandboxId::new();
         let this = Arc::clone(self);
         self.run_cancellation_safe("create", sandbox_id, async move {
-            this.create_sandbox_inner(sandbox_id, request, false).await
+            this.create_sandbox_inner(sandbox_id, request, false, storage_context)
+                .await
         })
         .await
     }
@@ -436,7 +488,8 @@ where
     ) -> Result<SandboxMetadata> {
         let this = Arc::clone(self);
         self.run_cancellation_safe("create_builder", build_id, async move {
-            this.create_sandbox_inner(build_id, request, true).await
+            this.create_sandbox_inner(build_id, request, true, None)
+                .await
         })
         .await
     }
@@ -451,11 +504,32 @@ where
         sandbox_id: SandboxId,
         request: CreateSandboxRequest,
         template_builder: bool,
+        storage_context: Option<crate::sandbox::storage::StorageContext>,
     ) -> Result<SandboxMetadata> {
         if let Err(err) = self.ensure_accepting_lifecycle_operations() {
             self.counters.record_create_fail(1);
             return Err(err);
         }
+
+        let mut admission_cleanup = crate::sandbox::storage::AdmissionCleanup(None);
+        let storage_context = if template_builder
+            && ConfigManager::global_config().storage_provider.enabled
+            && storage_context.is_none()
+        {
+            let resources = match &request.source {
+                SandboxLaunchSource::Snapshot(snapshot) => *snapshot.resources(),
+                SandboxLaunchSource::Image { resources, .. } => {
+                    resources.unwrap_or_else(default_fresh_sandbox_resources)
+                }
+            };
+            let context = crate::sandbox::storage::admit_compute(sandbox_id, resources, None)
+                .await
+                .map_err(|error| OrchestratorError::InternalError(error.to_string()))?;
+            admission_cleanup.0 = Some(context.clone());
+            Some(context)
+        } else {
+            storage_context
+        };
 
         let CreateSandboxRequest {
             source,
@@ -500,6 +574,7 @@ where
                     .clone()
                     .or_else(|| committed.custom_extension_params.clone());
                 let launch_config = SandboxLaunchConfig {
+                    storage_context: storage_context.clone(),
                     sandbox_id,
                     snapshot_id: record.id.to_string(),
                     env_vars,
@@ -512,6 +587,7 @@ where
                 };
 
                 let transitional_metadata = SandboxMetadata {
+                    storage_context: storage_context.clone(),
                     id: sandbox_id,
                     template_builder,
                     snapshot_id: record.id.to_string(),
@@ -559,6 +635,7 @@ where
                     extra_mmds.insert("imageConfigs".to_string(), launch_image_configs.to_value());
                 };
                 let launch_config = SandboxLaunchConfig {
+                    storage_context: storage_context.clone(),
                     sandbox_id,
                     snapshot_id: image_ref.clone(),
                     env_vars,
@@ -578,6 +655,7 @@ where
                 };
 
                 let transitional_metadata = SandboxMetadata {
+                    storage_context: storage_context.clone(),
                     id: sandbox_id,
                     template_builder,
                     snapshot_id: image_ref,
@@ -610,6 +688,7 @@ where
 
         match result {
             Ok(metadata) => {
+                admission_cleanup.disarm();
                 self.counters.record_create_success(1);
                 self.publish_sandbox_event(
                     SandboxLifecycleEventType::Create,
@@ -632,6 +711,7 @@ where
         count: u32,
         new_timeout: NewTimeout,
     ) -> Result<Vec<SandboxForkOutcome>> {
+        self.reject_external_fork(source_sandbox_id).await?;
         if self
             .store
             .get(&source_sandbox_id)
@@ -658,9 +738,25 @@ where
         child_specs: Vec<SandboxForkChildSpec>,
         new_timeout: NewTimeout,
     ) -> Result<Vec<SandboxForkOutcome>> {
+        self.reject_external_fork(source_sandbox_id).await?;
         let this = Arc::clone(self);
         self.run_cancellation_safe("fork", source_sandbox_id, async move {
-            this.fork_sandbox_inner(source_sandbox_id, child_specs, new_timeout)
+            this.fork_sandbox_inner(source_sandbox_id, child_specs, new_timeout, None)
+                .await
+        })
+        .await
+    }
+
+    pub async fn fork_sandbox_with_preparer(
+        self: &Arc<Self>,
+        source_sandbox_id: SandboxId,
+        child_specs: Vec<SandboxForkChildSpec>,
+        new_timeout: NewTimeout,
+        preparer: Arc<dyn SandboxForkPreparer>,
+    ) -> Result<Vec<SandboxForkOutcome>> {
+        let this = Arc::clone(self);
+        self.run_cancellation_safe("fork", source_sandbox_id, async move {
+            this.fork_sandbox_inner(source_sandbox_id, child_specs, new_timeout, Some(preparer))
                 .await
         })
         .await
@@ -668,7 +764,7 @@ where
 
     #[tracing::instrument(
         name = "fork_sandbox",
-        skip(self, child_specs),
+        skip(self, child_specs, preparer),
         fields(source_sandbox_id = %source_sandbox_id, count = child_specs.len())
     )]
     async fn fork_sandbox_inner(
@@ -676,6 +772,7 @@ where
         source_sandbox_id: SandboxId,
         child_specs: Vec<SandboxForkChildSpec>,
         new_timeout: NewTimeout,
+        preparer: Option<Arc<dyn SandboxForkPreparer>>,
     ) -> Result<Vec<SandboxForkOutcome>> {
         self.ensure_accepting_lifecycle_operations()?;
 
@@ -737,7 +834,14 @@ where
         // This is a single operation that will return a list of results for each child sandbox.
         let fork_result = {
             let mut sandbox = source_handle.lock().await;
-            sandbox.fork(&backend_specs).await
+            match &preparer {
+                Some(provider) => {
+                    sandbox
+                        .fork_prepared(&backend_specs, Arc::clone(provider))
+                        .await
+                }
+                None => sandbox.fork(&backend_specs).await,
+            }
         };
         let forked_backends = match fork_result {
             Ok(forked_backends) => forked_backends,
@@ -747,12 +851,30 @@ where
                 if err.is_terminal() {
                     self.detach_sandbox_handle_and_route(&source_sandbox_id)
                         .await;
-                    let _ = {
+                    let stopped = {
                         let mut sandbox = source_handle.lock().await;
                         sandbox.stop().await
                     };
-                    self.finalize_terminal_volumes(&source_metadata).await;
-                    self.store.remove(&source_sandbox_id).await?;
+                    if stopped.is_ok() {
+                        self.finalize_terminal_volumes(&source_metadata).await;
+                        self.store.remove(&source_sandbox_id).await?;
+                    } else {
+                        // A terminal capture is not proof that the VMM stopped.
+                        // Keep native metadata and its handle for delete/recovery.
+                        self.sandboxes
+                            .write()
+                            .await
+                            .insert(source_sandbox_id, source_handle.clone());
+                        self.store
+                            .update_state_if_state(
+                                &source_sandbox_id,
+                                SandboxState::Killing,
+                                &[SandboxState::Forking],
+                            )
+                            .await?;
+                        warn!(%source_sandbox_id, error = ?stopped.err(),
+                            "terminal fork stop unknown; retaining source ownership");
+                    }
                 } else {
                     let _ = self
                         .store
@@ -790,7 +912,7 @@ where
         let now = SystemTime::now();
         for (child, backend) in child_specs.into_iter().zip(forked_backends) {
             let sandbox_id = child.sandbox_id;
-            let backend = match backend {
+            let mut backend = match backend {
                 Ok(backend) => backend,
                 Err(err) => {
                     warn!(%sandbox_id, error = ?err, "failed to start forked sandbox");
@@ -804,13 +926,74 @@ where
             metadata.state = SandboxState::Running;
             metadata.created_at = now;
             metadata.paused_state = None;
-            metadata.volume_mounts = child.volume_mounts;
+            let mut failed_start = None;
+            if source_metadata.storage_context.is_some() {
+                let admitted = backend.fork_runtime_metadata().filter(|admitted| {
+                    source_metadata
+                        .storage_context
+                        .as_ref()
+                        .is_some_and(|parent| {
+                            admitted.storage_context.owner_uid != parent.owner_uid
+                                && admitted.storage_context.run_uid != parent.run_uid
+                        })
+                });
+                let Some(admitted) = admitted else {
+                    if Self::stop_failed_fork(&mut backend, sandbox_id).await {
+                        if let Some(provider) = &preparer {
+                            provider.cleanup_failed(sandbox_id).await;
+                        }
+                    } else if preparer.is_some() {
+                        metadata.storage_context = None;
+                        metadata.volume_mounts = child.volume_mounts.clone();
+                        self.retain_failed_native_runtime(
+                            metadata.clone(),
+                            Arc::new(Mutex::new(backend)),
+                            preparer.clone(),
+                        )
+                        .await;
+                    }
+                    outcomes.push(Err(Self::fork_child_error(
+                        sandbox_id,
+                        anyhow::anyhow!("fork backend omitted independent child admission"),
+                    )));
+                    continue;
+                };
+                failed_start = admitted.failed_start.clone();
+                metadata.storage_context = Some(admitted.storage_context.clone());
+                metadata.volume_mounts = admitted.volume_mounts.clone();
+            } else {
+                metadata.volume_mounts = child.volume_mounts;
+            }
             metadata.update_timeout(new_timeout);
+            if let Some(error) = failed_start {
+                self.retain_failed_native_runtime(
+                    metadata,
+                    Arc::new(Mutex::new(backend)),
+                    preparer.clone(),
+                )
+                .await;
+                outcomes.push(Err(Self::fork_child_error(
+                    sandbox_id,
+                    anyhow::anyhow!(error),
+                )));
+                continue;
+            }
 
             let proxy_target = match Self::proxy_target_from_sandbox(backend.as_ref()) {
                 Ok(proxy_target) => proxy_target,
                 Err(err) => {
-                    Self::stop_failed_fork(backend, sandbox_id).await;
+                    if Self::stop_failed_fork(&mut backend, sandbox_id).await {
+                        if let Some(provider) = &preparer {
+                            provider.cleanup_failed(sandbox_id).await;
+                        }
+                    } else if preparer.is_some() {
+                        self.retain_failed_native_runtime(
+                            metadata.clone(),
+                            Arc::new(Mutex::new(backend)),
+                            preparer.clone(),
+                        )
+                        .await;
+                    }
                     outcomes.push(Err(Self::fork_child_error(
                         sandbox_id,
                         anyhow::Error::new(err),
@@ -820,7 +1003,18 @@ where
             };
             if let Err(err) = self.store.add(metadata.clone()).await {
                 warn!(%sandbox_id, error = ?err, "failed to register forked sandbox");
-                Self::stop_failed_fork(backend, sandbox_id).await;
+                if Self::stop_failed_fork(&mut backend, sandbox_id).await {
+                    if let Some(provider) = &preparer {
+                        provider.cleanup_failed(sandbox_id).await;
+                    }
+                } else if preparer.is_some() {
+                    self.retain_failed_native_runtime(
+                        metadata.clone(),
+                        Arc::new(Mutex::new(backend)),
+                        preparer.clone(),
+                    )
+                    .await;
+                }
                 outcomes.push(Err(Self::fork_child_error(
                     sandbox_id,
                     anyhow::Error::new(err),
@@ -855,10 +1049,15 @@ where
         }
     }
 
-    async fn stop_failed_fork(mut backend: Box<dyn SandboxBackend>, sandbox_id: SandboxId) {
+    async fn stop_failed_fork(
+        backend: &mut Box<dyn SandboxBackend>,
+        sandbox_id: SandboxId,
+    ) -> bool {
         if let Err(err) = backend.stop().await {
             warn!(%sandbox_id, error = ?err, "failed to stop unsuccessful fork");
+            return false;
         }
+        true
     }
 
     /// Retrieves the metadata for a sandbox by its ID.
@@ -1111,23 +1310,16 @@ where
                 Ok(previous_state) => break previous_state,
                 Err(StoreError::StateConflict { actual_state, .. }) => match actual_state {
                     SandboxState::Killing => {
-                        debug!("sandbox already in killing state, waiting for delete to finish");
-                        match self
-                            .wait_for_transition(sandbox_id, SandboxState::Killing)
-                            .await
-                        {
-                            Ok(_) => {
-                                // The in-flight delete rolled back to a stable state.
-                                // Retry the Killing CAS rather than letting multiple
-                                // deleters run concurrently.
-                                continue;
-                            }
-                            Err(OrchestratorError::SandboxNotFound(_)) => {
-                                info!("sandbox was deleted by a concurrent delete");
-                                return Ok(());
-                            }
-                            Err(e) => return Err(e),
-                        }
+                        // Every native deleter holds this same progress mutex.
+                        // With no recorded progress, Killing is an interrupted
+                        // terminal operation, not another concurrent delete.
+                        // Retry stop before releasing any ownership.
+                        *progress = DeleteProgress::Stop {
+                            capture_failed: true,
+                        };
+                        return self
+                            .delete_sandbox_impl(sandbox_id, SandboxState::Killing, &mut progress)
+                            .await;
                     }
                     SandboxState::Creating
                     | SandboxState::Snapshotting
@@ -1222,6 +1414,25 @@ where
         progress: &mut DeleteProgress,
     ) -> Result<()> {
         let metadata = self.store.get(&sandbox_id).await?;
+        if let Some(context) = metadata.as_ref().and_then(|m| m.storage_context.as_ref()) {
+            // The provider durably records cleanup intent before the native
+            // Orchestrator detaches its handle or stops the VMM.
+            if let Err(error) = context.control("delete").await {
+                if matches!(progress, DeleteProgress::Capture) {
+                    let _ = self
+                        .store
+                        .update_state_if_state(
+                            &sandbox_id,
+                            previous_state,
+                            &[SandboxState::Killing],
+                        )
+                        .await;
+                }
+                return Err(OrchestratorError::InternalError(format!(
+                    "persist storage deletion intent: {error:#}"
+                )));
+            }
+        }
         let optional_cache = metadata
             .as_ref()
             .is_some_and(|record| record.template_builder);
@@ -1349,6 +1560,8 @@ where
         }
         self.release_image_refs(RuntimeImageOwner::PausedSandbox(sandbox_id))
             .await;
+        self.release_image_refs(RuntimeImageOwner::StartingSandbox(sandbox_id))
+            .await;
         self.deletions.lock().await.remove(&sandbox_id);
         info!("sandbox deleted");
 
@@ -1435,6 +1648,7 @@ where
     }
 
     async fn pause_sandbox_impl(self: &Arc<Self>, sandbox_id: SandboxId) -> Result<()> {
+        // Automatic pause uses the same native backend barrier and durable hold.
         // Pin paused runtime artifacts before detaching from the running set.
         let runtime_artifacts = {
             let handle = self.sandboxes.read().await.get(&sandbox_id).cloned();
@@ -1739,17 +1953,33 @@ where
             OrchestratorError::InternalError("missing paused state".to_string())
         })?;
 
-        let resumed = self
-            .launch_sandbox(LaunchPlan::for_resume(
-                sandbox_id,
-                Arc::clone(paused_state),
-                timeout,
-                metadata.resources,
-                metadata
-                    .secure
-                    .then(|| self.access_tokens.generate(metadata.id)),
-            ))
-            .await;
+        let plan = LaunchPlan::for_resume(
+            sandbox_id,
+            Arc::clone(paused_state),
+            timeout,
+            metadata.resources,
+            metadata
+                .secure
+                .then(|| self.access_tokens.generate(metadata.id)),
+        );
+        // The provider hands off the paused owner's exclusive use to a new run
+        // only after the old VMM has actually stopped. No public create call is
+        // involved; the original backend still restores the paused native ID.
+        let storage = if let Some(context) = &metadata.storage_context {
+            match context.prepare_resume().await {
+                Ok(next) => Some(next),
+                Err(error) => {
+                    self.rollback_failed_launch_metadata(&plan, SandboxState::Resuming)
+                        .await;
+                    return Err(OrchestratorError::InternalError(format!(
+                        "prepare storage resume: {error:#}"
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+        let resumed = self.launch_sandbox(plan.with_resume_storage(storage)).await;
         if let Ok(metadata) = resumed.as_ref() {
             self.release_image_refs(RuntimeImageOwner::PausedSandbox(sandbox_id))
                 .await;
@@ -1861,6 +2091,8 @@ where
     /// Seals writable persistent-volume uppers without capturing the VM's
     /// rootfs, memory, or device state so callers can clone them locally.
     pub async fn snapshot_volume_mounts(self: &Arc<Self>, sandbox_id: SandboxId) -> Result<()> {
+        self.reject_uncoordinated_storage_capture(sandbox_id)
+            .await?;
         let this = Arc::clone(self);
         self.run_cancellation_safe("snapshot_volumes", sandbox_id, async move {
             this.snapshot_volume_mounts_inner(sandbox_id).await
@@ -2009,6 +2241,8 @@ where
         sandbox_id: SandboxId,
         patch: serde_json::Map<String, serde_json::Value>,
     ) -> Result<Option<CustomExtensionParams>> {
+        // StorageProvider context is independent of user extension parameters.
+        // Preserve the normal extension hook even for a storage-managed sandbox.
         let this = Arc::clone(self);
         self.run_cancellation_safe("patch_custom_extension_params", sandbox_id, async move {
             this.patch_sandbox_custom_extension_params_inner(sandbox_id, patch)
@@ -2103,6 +2337,28 @@ where
     /// Counter fields are read atomically; resource fields are aggregated by
     /// scanning the metadata store, so the returned snapshot is always
     /// consistent with the orchestrator's current set of sandboxes.
+    /// IDs used to discount committed provider reservations must describe the
+    /// exact same metadata read as allocated resources. Routing IDs also include
+    /// dormant builds and must not be used for this accounting decision.
+    pub(crate) async fn storage_allocation_snapshot(
+        &self,
+    ) -> Result<(OrchestratorMetrics, Vec<SandboxId>)> {
+        let mut metrics = OrchestratorMetrics::default();
+        let mut ids = Vec::new();
+        self.store
+            .list_with_callback(|metadata| {
+                aggregate_resource_metrics(
+                    &mut metrics,
+                    SandboxContribution::new(metadata.state, metadata.resources),
+                );
+                if metadata.state != SandboxState::Paused {
+                    ids.push(metadata.id);
+                }
+            })
+            .await?;
+        Ok((metrics, ids))
+    }
+
     pub async fn metrics_snapshot(&self) -> Result<OrchestratorMetrics> {
         let mut metrics = OrchestratorMetrics::default();
         self.store
@@ -2430,6 +2686,15 @@ where
             warn!(error = %format_args!("{source:#}"), "failed to start sandbox");
             if let Err(stop_err) = sandbox.stop().await {
                 warn!(error = %format_args!("{stop_err:#}"), "failed to stop sandbox after start failure");
+                if plan.storage_context().is_some() {
+                    self.retain_failed_native_launch(&plan, Arc::new(Mutex::new(sandbox)))
+                        .await;
+                    return Err(OrchestratorError::SandboxOperationFailed {
+                        sandbox_id,
+                        operation: SandboxOperation::Start,
+                        source,
+                    });
+                }
             }
             self.rollback_failed_launch_metadata(&plan, transitional_state)
                 .await;
@@ -2446,6 +2711,11 @@ where
             info!("orchestrator started shutting down just after starting the sandbox");
             if let Err(err) = sandbox.stop().await {
                 warn!(error = %format_args!("{err:#}"), "failed to stop sandbox");
+                if plan.storage_context().is_some() {
+                    self.retain_failed_native_launch(&plan, Arc::new(Mutex::new(sandbox)))
+                        .await;
+                    return Err(OrchestratorError::ShuttingDown);
+                }
             }
             self.rollback_failed_launch_metadata(&plan, transitional_state)
                 .await;
@@ -2513,6 +2783,7 @@ where
         }
 
         let launch_timeout = plan.timeout();
+        let launch_storage = plan.storage_context();
         let final_metadata = match self
             .store
             .update_if_state(
@@ -2520,6 +2791,7 @@ where
                 std::slice::from_ref(&transitional_state),
                 move |metadata| {
                     metadata.resources = runtime_resources;
+                    metadata.storage_context = launch_storage;
                     metadata.state = SandboxState::Running;
                     metadata.update_timeout(launch_timeout);
                 },
@@ -2575,10 +2847,11 @@ where
                     .factory
                     .build((**build_spec).clone(), plan.launch_config.clone()),
             },
-            LaunchPlan::Resume(plan) => self.factory.build_from_paused_state(
+            LaunchPlan::Resume(plan) => self.factory.build_from_paused_state_with_storage(
                 plan.sandbox_id,
                 plan.paused_state.as_ref(),
                 plan.envd_access_token.clone(),
+                plan.storage_context.clone(),
             ),
         };
         build_result.map_err(|source| {
@@ -2592,7 +2865,7 @@ where
     }
 
     async fn cleanup_failed_launch(
-        &self,
+        self: &Arc<Self>,
         plan: &LaunchPlan,
         handle: SandboxHandle,
         stage: FailedLaunchStage,
@@ -2613,6 +2886,10 @@ where
         };
         if let Err(err) = stop_result {
             warn!(error = %format_args!("{err:#}"), "failed to stop sandbox while rolling back launch");
+            if plan.storage_context().is_some() && should_rollback_shared_state {
+                self.retain_failed_native_launch(plan, handle).await;
+                return;
+            }
         }
 
         if !should_rollback_shared_state {
@@ -2623,6 +2900,90 @@ where
             self.rollback_failed_launch_metadata(plan, expected_state)
                 .await;
         }
+    }
+
+    async fn retain_failed_native_launch(
+        self: &Arc<Self>,
+        plan: &LaunchPlan,
+        handle: SandboxHandle,
+    ) {
+        let id = plan.sandbox_id();
+        let mut metadata = match self.store.get(&id).await {
+            Ok(Some(metadata)) => metadata,
+            _ => plan
+                .transitional_metadata()
+                .cloned()
+                .unwrap_or_else(|| SandboxMetadata {
+                    id,
+                    resources: plan.resources(),
+                    ..Default::default()
+                }),
+        };
+        metadata.storage_context = plan.storage_context();
+        self.retain_failed_native_runtime(metadata, handle, None)
+            .await;
+    }
+
+    async fn retain_failed_native_runtime(
+        self: &Arc<Self>,
+        mut metadata: SandboxMetadata,
+        handle: SandboxHandle,
+        preparer: Option<Arc<dyn SandboxForkPreparer>>,
+    ) {
+        let id = metadata.id;
+        self.sandboxes.write().await.insert(id, handle.clone());
+        metadata.state = SandboxState::Killing;
+        if let Some(context) = metadata.storage_context.as_ref() {
+            if let Err(error) = context.persist_delete() {
+                warn!(%id,%error,"native cleanup intent needs retry");
+            }
+        }
+        let saved = match self.store.get(&id).await {
+            Ok(Some(_)) => self.store.update(metadata.clone()).await,
+            _ => self.store.add(metadata.clone()).await,
+        };
+        if let Err(error) = saved {
+            warn!(%id,%error,"failed to record native launch stop obligation");
+        }
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let Some(orchestrator) = weak.upgrade() else {
+                    break;
+                };
+                if let Some(context) = metadata.storage_context.as_ref() {
+                    if let Err(error) = context.control("delete").await {
+                        warn!(%id,%error,"native cleanup persistence needs retry");
+                        continue;
+                    }
+                }
+                if let Err(error) = handle.lock().await.stop().await {
+                    warn!(%id,%error,"native failed-launch stop retained for retry");
+                    continue;
+                }
+                if let Some(provider) = preparer.as_ref() {
+                    provider.cleanup_failed(id).await;
+                }
+                match orchestrator.delete_sandbox(id).await {
+                    Ok(()) => break,
+                    Err(OrchestratorError::SandboxNotFound(_)) => {
+                        // The native handle also survives metadata write failure.
+                        // Stop is now proven, so its own volume/image obligations
+                        // can finish even if there never was a public instance.
+                        orchestrator.sandboxes.write().await.remove(&id);
+                        orchestrator.finalize_terminal_volumes(&metadata).await;
+                        orchestrator
+                            .release_image_refs(RuntimeImageOwner::StartingSandbox(id))
+                            .await;
+                        break;
+                    }
+                    Err(error) => {
+                        warn!(%id,%error,"native failed-launch cleanup retained for retry")
+                    }
+                }
+            }
+        });
     }
 
     async fn rollback_failed_launch_metadata(

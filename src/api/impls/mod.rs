@@ -5,6 +5,8 @@ pub(crate) mod image_build;
 mod pagination;
 mod sandbox;
 mod snapshots;
+pub(crate) mod storage;
+mod storage_fork;
 mod template;
 mod template_helpers;
 mod volumes;
@@ -181,3 +183,5 @@ impl apis::default::Default<()> for ApiImpl {
         Ok(apis::default::HealthGetResponse::Status204_TheServiceIsHealthy)
     }
 }
+
+mod volume_provider;

@@ -43,9 +43,23 @@ pub struct SandboxSnapshotManifest {
     pub memory: SnapshotMemoryArtifacts,
     pub rootfs: SnapshotRootfsArtifacts,
     pub attached_drives: Vec<SnapshotAttachedDriveArtifacts>,
+    /// Immutable local volume heads held by this capture. Publication stores
+    /// these through the native volume catalog, not as physical attachedDrives.
+    #[serde(skip)]
+    pub captured_volumes: Vec<SnapshotAttachedDriveArtifacts>,
     /// Number of reserved virtio-block slots available for launch-time volumes.
     #[serde(default)]
     pub volume_drive_slots: usize,
+    #[serde(default)]
+    pub volume_readonly_slots: usize,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub storage_slot_layout: std::collections::BTreeMap<String, usize>,
+    /// Filesystems frozen in the captured guest memory; thaw before Ready.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frozen_filesystems: Vec<super::storage::freeze::FrozenFilesystem>,
+    /// Opaque, versioned provider checkpoint; no tickets or host device paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_checkpoint: Option<serde_json::Value>,
     /// Number of attached drives represented by IDs in the Firecracker snapshot.
     /// Launch-time volumes use the reserved slots that follow these drives.
     #[serde(default)]
@@ -126,7 +140,12 @@ impl SandboxSnapshotManifest {
                 virtual_size: rootfs_virtual_size,
             },
             attached_drives: Vec::new(),
+            captured_volumes: Vec::new(),
             volume_drive_slots: 0,
+            volume_readonly_slots: 0,
+            storage_slot_layout: Default::default(),
+            frozen_filesystems: Vec::new(),
+            storage_checkpoint: None,
             physical_extra_drive_count: attached_drives.len(),
             memory_startup_pack: None,
         }
@@ -258,7 +277,12 @@ mod tests {
                 virtual_size: 4096,
             },
             attached_drives: vec![known],
+            captured_volumes: Vec::new(),
             volume_drive_slots: 0,
+            volume_readonly_slots: 0,
+            storage_slot_layout: Default::default(),
+            frozen_filesystems: Vec::new(),
+            storage_checkpoint: None,
             physical_extra_drive_count: 1,
             memory_startup_pack: None,
         };

@@ -17,9 +17,9 @@ use async_trait::async_trait;
 use tokio::time::sleep;
 
 use super::backend::{
-    CapturedSandboxSnapshot, PausedSandboxState, RuntimeArtifactSet, SandboxBackend,
-    SandboxBackendFactory, SandboxCaptureResult, SandboxForkResult, SandboxForkSpec,
-    SandboxRuntimeInfo,
+    CapturedSandboxSnapshot, ForkRuntimeMetadata, PausedSandboxState, RuntimeArtifactSet,
+    SandboxBackend, SandboxBackendFactory, SandboxCaptureResult, SandboxForkPreparer,
+    SandboxForkResult, SandboxForkSpec, SandboxRuntimeInfo,
 };
 use super::{FreshSandboxBuildSpec, SandboxCaptureError, SandboxLaunchConfig};
 use crate::sandbox::CustomExtensionParams;
@@ -257,6 +257,7 @@ pub struct MockSandboxBackend {
     behavior: Arc<MockBehavior>,
     host_ip: Option<std::net::Ipv4Addr>,
     volumes_frozen: bool,
+    fork_metadata: Option<ForkRuntimeMetadata>,
 }
 
 impl MockSandboxBackend {
@@ -272,6 +273,7 @@ impl MockSandboxBackend {
             behavior,
             host_ip,
             volumes_frozen: false,
+            fork_metadata: None,
         }
     }
 }
@@ -375,6 +377,37 @@ impl SandboxBackend for MockSandboxBackend {
                     })
             })
             .collect())
+    }
+
+    async fn fork_prepared(
+        &mut self,
+        specs: &[SandboxForkSpec],
+        preparer: Arc<dyn SandboxForkPreparer>,
+    ) -> SandboxCaptureResult<Vec<SandboxForkResult>> {
+        self.behavior
+            .apply_capture_result(MockOperation::Fork)
+            .await?;
+        let manifest = crate::sandbox::SandboxSnapshotManifest::for_test(4096, &[]);
+        let mut results = Vec::new();
+        for spec in specs {
+            let result = async {
+                let prepared = preparer.prepare(&manifest, spec).await?;
+                self.behavior.apply_sync(MockOperation::ForkChild)?;
+                let mut child = Self::new_with_host_ip(Arc::clone(&self.behavior), self.host_ip);
+                child.fork_metadata = Some(prepared.metadata);
+                Ok(Box::new(child) as Box<dyn SandboxBackend>)
+            }
+            .await;
+            if result.is_err() {
+                preparer.cleanup_failed(spec.sandbox_id).await;
+            }
+            results.push(result);
+        }
+        Ok(results)
+    }
+
+    fn fork_runtime_metadata(&self) -> Option<&ForkRuntimeMetadata> {
+        self.fork_metadata.as_ref()
     }
 
     async fn stop(&mut self) -> Result<()> {

@@ -138,6 +138,11 @@ impl SnapshotListFilter {
 /// - shared artifact imports should use atomic protocols so concurrent writers do not expose
 ///   half-written managed layers
 pub trait SnapshotRepository: Send + Sync {
+    /// Stable identity of the authoritative catalog, not its node-local cache.
+    async fn storage_identity(&self) -> RepositoryResult<String> {
+        unsupported("storage repository identity")
+    }
+
     /// Creates a durable template snapshot record before build artifacts exist.
     ///
     /// Backends should reject records that already contain a committed artifact payload and should

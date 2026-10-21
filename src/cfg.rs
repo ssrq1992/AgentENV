@@ -141,6 +141,8 @@ pub struct AppConfig {
     pub network: NetworkConfig,
     #[config(nested)]
     pub custom_extension: CustomExtensionConfig,
+    #[config(nested)]
+    pub storage_provider: StorageProviderConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Config)]
@@ -656,8 +658,33 @@ pub struct OrchestratorConfig {
 /// Custom extension service integration.
 ///
 /// The custom extension is an external HTTP service that extends node
-/// behavior. Its only current capability is sandbox lifecycle hooks
-/// (`/sandbox-hook/*`), but more may be added in the future.
+/// behavior through lifecycle hooks (`/sandbox-hook/*`). Storage uses its own
+/// independently configured provider.
+/// Generic node-local storage integration, independent of custom extensions.
+#[derive(Debug, Config, Clone)]
+pub struct StorageProviderConfig {
+    /// Admit original API requests through the authenticated host-local plugin.
+    #[config(default = false, env = "AENV_STORAGE_PROVIDER_STANDALONE")]
+    pub standalone: bool,
+    #[config(default = false, env = "AENV_STORAGE_PROVIDER_ENABLED")]
+    pub enabled: bool,
+    #[config(env = "AENV_STORAGE_PROVIDER_URL", parse_env = parse_trimmed_string)]
+    pub url: Option<String>,
+    #[config(
+        default = "/etc/agentenv-storage/hook-token",
+        env = "AENV_STORAGE_PROVIDER_TOKEN_FILE"
+    )]
+    pub token_file: PathBuf,
+    #[config(default = "/var/lib/agentenv-external")]
+    pub state_dir: PathBuf,
+    #[config(default = "/var/lib/ssf")]
+    pub device_root: PathBuf,
+    #[config(default = 0usize, env = "AENV_STORAGE_PROVIDER_READONLY_SLOTS")]
+    pub readonly_slots: usize,
+    #[config(default = 120000u64)]
+    pub timeout_ms: u64,
+}
+
 #[derive(Debug, Config, Clone)]
 pub struct CustomExtensionConfig {
     /// Optional HTTP base URL of the custom extension service.
@@ -732,6 +759,7 @@ impl_config_default!(
     OrchestratorConfig,
     P2pConfig,
     CustomExtensionConfig,
+    StorageProviderConfig,
 );
 
 impl AppConfig {
