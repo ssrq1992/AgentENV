@@ -1881,6 +1881,15 @@ where
                 .await?;
         }
 
+        // The API surface reports "paused" while a pause is still settling,
+        // so a connect that races the tail of an in-flight pause must wait
+        // for it to resolve instead of failing with an invalid-state error.
+        if metadata.state == SandboxState::Pausing {
+            metadata = self
+                .wait_for_transition(sandbox_id, SandboxState::Pausing)
+                .await?;
+        }
+
         match metadata.state {
             SandboxState::Killing => {
                 return Err(OrchestratorError::SandboxNotFound(sandbox_id));

@@ -31,7 +31,7 @@ spec:
             periodSeconds: 2
             failureThreshold: 60
           readinessProbe:
-            httpGet: {path: /readyz, port: ssf-health}
+            httpGet: {path: /livez, port: ssf-health}
           volumeMounts:
             - {name: storage-config, mountPath: /etc/agentenv-ssf, readOnly: true}
             - {name: storage-node-keys, mountPath: /etc/agentenv-storage, readOnly: true}

@@ -62,7 +62,9 @@ def main():
         require(restored['sandboxID'] == identity, 'connect changed native ID')
         state['source'] = restored
     def timeout():
-        child = suite.create('/sandboxes-cold', {'image': a.image, 'timeout': 3600})
+        # autoPause absent defaults to pause-on-timeout (upstream AgentENV semantics);
+        # this case verifies the delete path, so opt out of pause explicitly.
+        child = suite.create('/sandboxes-cold', {'image': a.image, 'timeout': 3600, 'autoPause': False})
         identity = child['sandboxID']
         suite.api('POST', '/sandboxes/' + identity + '/timeout', {'timeout': 1}, 204)
         deadline = time.monotonic() + a.timeout

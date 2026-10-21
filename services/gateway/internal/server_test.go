@@ -862,6 +862,18 @@ func TestUpstreamTargetPath(t *testing.T) {
 			want:        "/proxy/",
 		},
 		{
+			name:        "header route explicit proxy path unchanged",
+			routeSource: routeSourceHeader,
+			path:        "/proxy/health",
+			want:        "/proxy/health",
+		},
+		{
+			name:        "host route explicit proxy path unchanged",
+			routeSource: routeSourceHost,
+			path:        "/proxy/process.Process/Start",
+			want:        "/proxy/process.Process/Start",
+		},
+		{
 			name:        "path route unchanged",
 			routeSource: routeSourcePath,
 			path:        "/sandboxes/sbx-1/pause",
