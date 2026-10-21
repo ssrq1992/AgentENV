@@ -13,6 +13,7 @@ spec:
         - name: ssf-node
           restartPolicy: Always
           image: ssf:latest
+          imagePullPolicy: Always
           command: [ssf-node]
           args: [-config, /etc/agentenv-ssf/ssf-node.json]
           env:
@@ -42,6 +43,7 @@ spec:
         - name: agentenv-storage
           restartPolicy: Always
           image: agentenvadapter:latest
+          imagePullPolicy: Always
           args: [node, -config, /etc/agentenv-ssf/node.json]
           env:
             - name: NODE_NAME
