@@ -6,10 +6,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"ssf.dev/ssf/auth"
 	"ssf.dev/ssf/core"
@@ -254,7 +258,7 @@ func (n *Node) nativeLifecycle(w http.ResponseWriter, r *http.Request) {
 		dataFields["capture"] = q.Capture
 	}
 	data, _ := json.Marshal(dataFields)
-	result, err := n.Control(r.Context(), NativeCommand{Action: q.Action, NodeID: n.Config.NativeNodeID, OwnerID: record.Native.OwnerUID, RunID: record.Native.RunUID, Data: data})
+	result, err := n.controlResumeWithHandoffWait(r.Context(), q.Action, record, data)
 	if err != nil {
 		problem(w, 409, err)
 		return
@@ -274,6 +278,45 @@ func (n *Node) nativeLifecycle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, 200, json.RawMessage(result))
+}
+
+// The storage provider hands a paused owner's exclusive use to a new run
+// only after the old VMM has actually stopped, and the runtime can observe
+// the paused state before that stop receipt has reached the scheduler. A
+// resume racing that settling tail must wait for the handoff instead of
+// surfacing the transient conflict to the caller.
+const resumeHandoffWait = 60 * time.Second
+
+// controlResumeWithHandoffWait forwards a lifecycle control command and, for
+// resume only, retries while the scheduler still reports the previous run as
+// holding the resource exclusively.
+func (n *Node) controlResumeWithHandoffWait(ctx context.Context, action string, record NodeRecord, data []byte) (json.RawMessage, error) {
+	command := NativeCommand{Action: action, NodeID: n.Config.NativeNodeID, OwnerID: record.Native.OwnerUID, RunID: record.Native.RunUID, Data: data}
+	deadline := time.Now().Add(resumeHandoffWait)
+	for {
+		result, err := n.Control(ctx, command)
+		if err == nil || action != "resume" || !isHandoffConflict(err) || time.Now().After(deadline) {
+			return result, err
+		}
+		slog.Warn("resume handoff still settling; retrying", "request_id", record.Request.ID, "error", err.Error())
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// isHandoffConflict reports whether the storage scheduler rejected the
+// command because the previous run still holds the resource exclusively.
+func isHandoffConflict(err error) bool {
+	if errors.Is(err, core.ErrConflict) {
+		return true
+	}
+	if st, ok := status.FromError(err); ok {
+		return st.Code() == codes.FailedPrecondition
+	}
+	return false
 }
 
 func (n *Node) nativeVolumeControl(w http.ResponseWriter, r *http.Request) {
