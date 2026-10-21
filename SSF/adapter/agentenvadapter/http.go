@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -75,6 +76,7 @@ func respond(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func problem(w http.ResponseWriter, code int, e error) {
+	slog.Warn("storage control request failed", "status", code, "error", e.Error())
 	respond(w, code, map[string]string{"error": e.Error()})
 }
 func identity(r *http.Request) string {
