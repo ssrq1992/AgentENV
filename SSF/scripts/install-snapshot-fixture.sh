@@ -20,6 +20,8 @@ apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshotClass
 metadata:
   name: ssf-$mode
+  annotations:
+    snapshot.storage.kubernetes.io/is-default-class: "true"
 driver: test.$mode.ssf.dev
 deletionPolicy: Retain
 YAML
