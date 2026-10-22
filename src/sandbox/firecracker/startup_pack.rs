@@ -87,18 +87,53 @@ pub(crate) async fn record_startup_pack(
 /// clean up (unbounded). The VM handle and device id live outside the
 /// timeout scope so the cleanup path always runs to completion.
 async fn boot_and_wait(
-    config: FirecrackerSnapshotConfig,
+    mut config: FirecrackerSnapshotConfig,
     trace_path: &Path,
     budget_secs: u64,
 ) -> Option<PathBuf> {
     let phase_t0 = std::time::Instant::now();
-    let mut recording_vm = match FirecrackerSandbox::from_snapshot_config(&config) {
-        Ok(vm) => vm,
-        Err(error) => {
-            warn!(%error, "startup pack: build recording VM failed");
+    let id = crate::types::SandboxId::new();
+    let mut admission_cleanup = crate::sandbox::storage::AdmissionCleanup(None);
+    if ConfigManager::global_config().storage_provider.enabled {
+        let Some(resources) = config.resources else {
+            warn!("startup pack: captured machine resources unavailable");
+            return None;
+        };
+        if config.common.storage_context.as_ref().is_some_and(|parent| !parent.managed_mounts.is_empty())
+            && config.common.storage_checkpoint.is_none() {
+            warn!("startup pack: managed capture is missing its joint checkpoint");
             return None;
         }
-    };
+        let context = match crate::sandbox::storage::admit_compute(
+            id,
+            resources,
+            config.common.storage_checkpoint.as_ref(),
+        )
+        .await
+        {
+            Ok(context) => context,
+            Err(error) => {
+                warn!(%error, "startup pack: compute/storage admission failed");
+                return None;
+            }
+        };
+        if config.common.storage_context.as_ref().is_some_and(|parent|
+            parent.owner_uid == context.owner_uid || parent.run_uid == context.run_uid) {
+            warn!("startup pack: provider reused the source writer identity");
+            return None;
+        }
+        admission_cleanup.0 = Some(context.clone());
+        config.common.storage_context = Some(context);
+    }
+    let token = config.common.envd_access_token.clone();
+    let mut recording_vm =
+        match FirecrackerSandbox::from_snapshot_config_with_override(config, id, token) {
+            Ok(vm) => vm,
+            Err(error) => {
+                warn!(%error, "startup pack: build recording VM failed");
+                return None;
+            }
+        };
     if let Err(error) = recording_vm.start_nowait().await {
         warn!(%error, "startup pack: recording VM start failed");
         // Best-effort teardown of whatever start_nowait managed to create.

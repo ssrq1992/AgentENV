@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 
 use crate::io::virtual_file::VirtualFile;
 
@@ -29,6 +29,20 @@ fn le32(buf: &[u8], offset: usize) -> u32 {
 /// Read the ext4 superblock from `file` and return the filesystem's used
 /// bytes (`df`'s "Used" column). Errors when the view is not a plausible ext4.
 pub async fn ext4_used_bytes(file: &Arc<dyn VirtualFile>) -> Result<u64> {
+    Ok(ext4_geometry(file).await?.used_bytes)
+}
+
+/// Parsed geometry, not proof of filesystem integrity or a clean journal.
+/// Offline maintenance must additionally validate the device and execute its
+/// filesystem check before relying on these counters for publication.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Ext4Geometry {
+    pub capacity_bytes: u64,
+    pub used_bytes: u64,
+    pub uuid: [u8; 16],
+}
+
+pub async fn ext4_geometry(file: &Arc<dyn VirtualFile>) -> Result<Ext4Geometry> {
     let sb = file
         .read_at(SUPERBLOCK_OFFSET, SUPERBLOCK_LEN)
         .await
@@ -38,8 +52,10 @@ pub async fn ext4_used_bytes(file: &Arc<dyn VirtualFile>) -> Result<u64> {
         le16(&sb, 0x38) == EXT4_MAGIC,
         "not an ext4 filesystem (bad superblock magic)"
     );
+    let shift = le32(&sb, 0x18);
+    ensure!(shift <= 6, "unsupported ext4 block size");
     let block_size = 1024u64
-        .checked_shl(le32(&sb, 0x18))
+        .checked_shl(shift)
         .context("ext4 block size shift overflow")?;
     let mut blocks_count = u64::from(le32(&sb, 0x04));
     let mut free_blocks = u64::from(le32(&sb, 0x0C));
@@ -51,9 +67,20 @@ pub async fn ext4_used_bytes(file: &Arc<dyn VirtualFile>) -> Result<u64> {
         blocks_count > 0 && free_blocks <= blocks_count,
         "implausible ext4 counters: blocks={blocks_count} free={free_blocks}"
     );
-    (blocks_count - free_blocks)
+    let used_bytes = (blocks_count - free_blocks)
         .checked_mul(block_size)
-        .context("ext4 used size overflow")
+        .context("ext4 used size overflow")?;
+    let capacity_bytes = blocks_count
+        .checked_mul(block_size)
+        .context("ext4 capacity overflow")?;
+    let uuid = sb[0x68..0x78]
+        .try_into()
+        .expect("validated superblock length");
+    Ok(Ext4Geometry {
+        capacity_bytes,
+        used_bytes,
+        uuid,
+    })
 }
 
 #[cfg(test)]
@@ -116,5 +143,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = open_image(&dir, &vec![0u8; 2048]).await;
         assert!(ext4_used_bytes(&file).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn geometry_preserves_uuid_and_rejects_short_or_overflowing_superblocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = fake_image(2, 1024, 10, false);
+        bytes[1024 + 0x68..1024 + 0x78].copy_from_slice(&[7; 16]);
+        let file = open_image(&dir, &bytes).await;
+        let geometry = ext4_geometry(&file).await.unwrap();
+        assert_eq!(geometry.capacity_bytes, 1024 * 4096);
+        assert_eq!(geometry.uuid, [7; 16]);
+        drop(file);
+        let file = open_image(&dir, &bytes[..1500]).await;
+        assert!(ext4_geometry(&file).await.is_err());
+        drop(file);
+        let file = open_image(&dir, &fake_image(2, u64::MAX, 0, true)).await;
+        assert!(ext4_geometry(&file).await.is_err());
+        drop(file);
+        let file = open_image(&dir, &fake_image(63, 1024, 0, false)).await;
+        assert!(ext4_geometry(&file).await.is_err());
     }
 }

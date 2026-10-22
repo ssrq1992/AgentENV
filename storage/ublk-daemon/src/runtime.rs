@@ -6,15 +6,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use overlaybd::config::{load_image_config, validate_upper_config, UpperConfig, UpperMode};
+use overlaybd::config::{UpperConfig, UpperMode, load_image_config, validate_upper_config};
 use overlaybd::helper::{
     prepare_runtime_upper, relative_path, resolve_config_path, rewrite_overlaybd_lower_paths,
 };
 use overlaybd::image_file::ImageFile;
-use overlaybd::index_file::{validate_rw_header_pair_paths, RwLayout};
+use overlaybd::index_file::{RwLayout, validate_rw_header_pair_paths};
 use overlaybd::layer_metadata::{read_overlaybd_layer_virtual_size, resolve_local_layer_path};
 use overlaybd::virtual_file::VirtualFile;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
 use crate::protocol::ResizeToolSpec;
@@ -103,6 +103,9 @@ pub(crate) struct MaterializeOverlaybdRuntimeRequest<'a> {
     /// all share the single isolated resize cacheDir.
     pub(crate) resize_permit: Arc<tokio::sync::Mutex<()>>,
     pub(crate) allow_shrink: bool,
+    /// Durable managed operations retain partial files for recovery. Legacy
+    /// requests still roll back their privately claimed directory on failure.
+    pub(crate) retain_on_error: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,6 +128,7 @@ pub(crate) async fn materialize_overlaybd_runtime(
     request: MaterializeOverlaybdRuntimeRequest<'_>,
 ) -> Result<MaterializedOverlaybdRuntime> {
     let claimed_runtime_dir = ClaimedRuntimeDir::claim(request.runtime_dir)?;
+    let retain_on_error = request.retain_on_error;
     match materialize_runtime_contents(request).await {
         Ok((runtime_image_config_path, actual_virtual_size)) => Ok(MaterializedOverlaybdRuntime {
             runtime_image_config_path,
@@ -132,7 +136,9 @@ pub(crate) async fn materialize_overlaybd_runtime(
             claimed_runtime_dir,
         }),
         Err(err) => {
-            claimed_runtime_dir.cleanup();
+            if !retain_on_error {
+                claimed_runtime_dir.cleanup();
+            }
             Err(err)
         }
     }
@@ -154,6 +160,7 @@ async fn materialize_runtime_contents(
         resize_global_config,
         resize_permit,
         allow_shrink,
+        retain_on_error: _,
     } = request;
 
     let base_virtual_size = match known_source_virtual_size {
@@ -624,7 +631,7 @@ mod tests {
 
     use overlaybd::backend::local::LocalFile;
     use overlaybd::config::GlobalConfig;
-    use overlaybd::index_file::{create_file_rw, LayerInfo};
+    use overlaybd::index_file::{LayerInfo, create_file_rw};
 
     async fn test_cache(dir: &Path) -> (ImageServiceCache, PathBuf) {
         let global_config = dir.join("global.json");
@@ -672,6 +679,33 @@ mod tests {
             resize_global_config: global_config,
             resize_permit: Arc::new(tokio::sync::Mutex::new(())),
             allow_shrink: false,
+            retain_on_error: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_materialization_failure_retains_claim_while_legacy_rolls_back() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = ImageServiceCache::new(None);
+        let source = temp.path().join("missing-source.json");
+        let global = temp.path().join("missing-global.json");
+        for retain in [false, true] {
+            let root = temp.path().join(if retain { "managed" } else { "legacy" });
+            let mut request = materialize_test_request(&cache, &source, &global, &root);
+            request.retain_on_error = retain;
+            assert!(
+                materialize_overlaybd_runtime(request.clone())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(root.exists(), retain);
+            if retain {
+                let marker = root.join("partial-upper");
+                std::fs::write(&marker, b"preserve").unwrap();
+                // Retrying never claims or clears a previously owned directory.
+                assert!(materialize_overlaybd_runtime(request).await.is_err());
+                assert_eq!(std::fs::read(&marker).unwrap(), b"preserve");
+            }
         }
     }
 

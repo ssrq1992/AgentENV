@@ -265,10 +265,45 @@ impl ImageFile {
         Ok(descriptor)
     }
 
+    /// Copy the current native runtime manifest under the same state lock used
+    /// by restack. Callers needing a frozen capture must hold their VM barrier.
+    pub async fn runtime_config(&self) -> ImageConfig {
+        self.state.read().await.config.clone()
+    }
+
     pub async fn create_snapshot_and_restack(
         &self,
         output_layer_path: &Path,
     ) -> Result<Option<LayerDescriptor>> {
+        self.restack_with_checkpoint(output_layer_path, None::<fn(&ImageConfig) -> Result<()>>)
+            .await
+    }
+
+    /// Persist a host-owned recovery description while the image write barrier
+    /// is still held. The immutable layer and fresh upper are synced before
+    /// calling the checkpoint. No writable restacked image is exposed until it
+    /// succeeds. A checkpoint failure is terminal, just like a restack failure.
+    /// The host supplies persistence; the device engine knows no runtime/CSI IDs.
+    pub async fn create_snapshot_and_restack_checkpointed<F>(
+        &self,
+        output_layer_path: &Path,
+        checkpoint: F,
+    ) -> Result<Option<LayerDescriptor>>
+    where
+        F: FnOnce(&ImageConfig) -> Result<()> + Send,
+    {
+        self.restack_with_checkpoint(output_layer_path, Some(checkpoint))
+            .await
+    }
+
+    async fn restack_with_checkpoint<F>(
+        &self,
+        output_layer_path: &Path,
+        checkpoint: Option<F>,
+    ) -> Result<Option<LayerDescriptor>>
+    where
+        F: FnOnce(&ImageConfig) -> Result<()> + Send,
+    {
         let mut state = self.state.write().await;
         let upper_mode = state.config.upper.writable_mode();
         let upper_data_path = PathBuf::from(&state.config.upper.data);
@@ -365,7 +400,8 @@ impl ImageFile {
             .filter(|uuid| !uuid.is_nil())
             .map(|uuid| uuid.to_string())
             .unwrap_or_default();
-        state.config.lowers.push(LayerConfig {
+        let mut next_config = state.config.clone();
+        next_config.lowers.push(LayerConfig {
             file: output_layer_path.display().to_string(),
             digest: descriptor
                 .as_ref()
@@ -379,6 +415,25 @@ impl ImageFile {
             uuid,
             ..LayerConfig::default()
         });
+        if let Some(checkpoint) = checkpoint {
+            // A JSON receipt alone is not durable content. Sync both the seal
+            // and replacement upper, including directory entries, before the
+            // host can publish a checkpoint or thaw a guest.
+            let persist = || -> Result<()> {
+                let mut paths = vec![output_layer_path, upper_data_path.as_path()];
+                if let Some(index) = upper_index_path.as_deref() {
+                    paths.push(index);
+                }
+                for path in paths {
+                    std::fs::File::open(path)?.sync_all()?;
+                    std::fs::File::open(path.parent().context("restack path has no parent")?)?
+                        .sync_all()?;
+                }
+                checkpoint(&next_config)
+            };
+            persist().map_err(into_restack_terminal_failure)?;
+        }
+        state.config = next_config;
         state.base = ImageFileBase::ReadWrite(restacked);
         self.update_size_metadata(virtual_size);
         Ok(descriptor)
@@ -1611,6 +1666,152 @@ mod tests {
         let stat = image.data_stat().await.expect("data stat");
         assert_eq!(stat.valid_data_size, 8192);
         assert!(stat.total_data_size >= 4096);
+    }
+
+    #[tokio::test]
+    async fn test_checkpointed_restack_reopens_unmoved_upper_after_partial_seal() {
+        for partial_trailer in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let lower = tmp.path().join("base.commit");
+            create_sealed_lower(&lower, &tmp.path().join("base.index"), &vec![0x11; 8192])
+                .await
+                .unwrap();
+            let data = tmp.path().join("upper.data");
+            let index = tmp.path().join("upper.index");
+            create_initialized_upper(&data, &index, 8192).await.unwrap();
+            let mut config = ImageConfig::default();
+            config.lowers.push(LayerConfig {
+                file: lower.display().to_string(),
+                ..Default::default()
+            });
+            config.upper = UpperConfig {
+                data: data.display().to_string(),
+                index: index.display().to_string(),
+                ..Default::default()
+            };
+            let service = build_service(&tmp).await;
+            let image = ImageFile::open(config.clone(), service.clone(), None)
+                .await
+                .unwrap();
+            image.write_at(0, &vec![0x22; 4096]).await.unwrap();
+            image.sync().await.unwrap();
+            image
+                .state
+                .read()
+                .await
+                .base
+                .writable()
+                .unwrap()
+                .close_seal()
+                .await
+                .unwrap();
+            drop(image);
+            if partial_trailer {
+                let file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
+                let size = file.metadata().unwrap().len();
+                file.set_len(size - 2048).unwrap();
+                file.sync_all().unwrap();
+            }
+            // Full seals must reopen read-only. Partial appended trailers can
+            // resume through the unchanged original RW index without formatting.
+            let output = tmp.path().join("recovered.commit");
+            let recovered = if partial_trailer {
+                let recovered = ImageFile::open(config, service, None).await.unwrap();
+                recovered
+                    .create_snapshot_and_restack_checkpointed(&output, |_| Ok(()))
+                    .await
+                    .unwrap();
+                recovered
+            } else {
+                assert!(ImageFile::open(config.clone(), service.clone(), None)
+                    .await
+                    .is_err());
+                std::fs::hard_link(&data, &output).unwrap();
+                let mut readonly = config;
+                readonly.lowers.push(LayerConfig {
+                    file: output.display().to_string(),
+                    ..Default::default()
+                });
+                readonly.upper = Default::default();
+                ImageFile::open(readonly, service, None).await.unwrap()
+            };
+            let bytes = recovered.read_at(0, 8192).await.unwrap();
+            assert_eq!(&bytes[..4096], &vec![0x22; 4096]);
+            assert_eq!(&bytes[4096..], &vec![0x11; 4096]);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_checkpointed_restack_recovers_from_persisted_config_and_rejects_failed_checkpoint(
+    ) {
+        for fail_checkpoint in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let lower_path = tmp.path().join("lower.data");
+            let lower_index = tmp.path().join("lower.index");
+            create_sealed_lower(&lower_path, &lower_index, &vec![0x11; 8192])
+                .await
+                .unwrap();
+            let upper_data = tmp.path().join("upper.data");
+            let upper_index = tmp.path().join("upper.index");
+            create_initialized_upper(&upper_data, &upper_index, 8192)
+                .await
+                .unwrap();
+            let mut config = ImageConfig::default();
+            config.lowers = vec![LayerConfig {
+                file: lower_path.display().to_string(),
+                ..Default::default()
+            }];
+            config.upper = UpperConfig {
+                data: upper_data.display().to_string(),
+                index: upper_index.display().to_string(),
+                ..Default::default()
+            };
+            let runtime_path = tmp.path().join("runtime.json");
+            std::fs::write(&runtime_path, serde_json::to_vec(&config).unwrap()).unwrap();
+            let service = build_service(&tmp).await;
+            let image = ImageFile::open(config, service.clone(), None)
+                .await
+                .unwrap();
+            image.write_at(0, &vec![0x22; 4096]).await.unwrap();
+            let output = tmp.path().join("snapshot.commit");
+            let called = std::sync::atomic::AtomicBool::new(false);
+            let result = image
+                .create_snapshot_and_restack_checkpointed(&output, |next| {
+                    called.store(true, Ordering::SeqCst);
+                    assert_eq!(
+                        next.lowers.last().unwrap().file,
+                        output.display().to_string()
+                    );
+                    assert!(output.metadata()?.len() > 0);
+                    if fail_checkpoint {
+                        bail!("injected checkpoint failure");
+                    }
+                    let file = std::fs::File::create(&runtime_path)?;
+                    serde_json::to_writer(&file, next)?;
+                    file.sync_all()?;
+                    Ok(())
+                })
+                .await;
+            assert!(called.load(Ordering::SeqCst));
+            if fail_checkpoint {
+                assert!(result
+                    .unwrap_err()
+                    .downcast_ref::<RestackSnapshotTerminalFailure>()
+                    .is_some());
+                assert!(image.write_at(4096, &vec![0x33; 4096]).await.is_err());
+                continue;
+            }
+            result.unwrap();
+            image.write_at(4096, &vec![0x33; 4096]).await.unwrap();
+            image.sync().await.unwrap();
+            drop(image);
+            // Open only the durable config after dropping the original image.
+            // Both the sealed bytes and writes to the new upper must survive.
+            let restored = service.create_image_file(&runtime_path).await.unwrap();
+            let bytes = restored.read_at(0, 8192).await.unwrap();
+            assert_eq!(&bytes[..4096], &vec![0x22; 4096]);
+            assert_eq!(&bytes[4096..], &vec![0x33; 4096]);
+        }
     }
 
     #[tokio::test]

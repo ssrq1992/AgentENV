@@ -34,6 +34,11 @@ struct Cli {
     #[arg(long)]
     resize_global_config: PathBuf,
 
+    /// Persistent state for a dedicated managed CSI daemon. Disables legacy
+    /// device commands and parent-exit shutdown; SIGTERM drains live sessions.
+    #[arg(long)]
+    managed_state_dir: Option<PathBuf>,
+
     /// Path to AgentENV TOML config. Pool settings are read from [pool.block].
     #[arg(long)]
     config: Option<PathBuf>,
@@ -339,6 +344,11 @@ fn main() -> Result<()> {
             server.enable_pool(pool_config, features);
         }
 
+        let managed_mode = cli.managed_state_dir.is_some();
+        if let Some(root) = cli.managed_state_dir.clone() {
+            server.enable_managed_sessions(root)?;
+        }
+
         // Open a pidfd for the parent process. When the parent process
         // exits the fd becomes readable, allowing us to shut down
         // gracefully. This monitors process-level lifetime (not thread),
@@ -369,7 +379,7 @@ fn main() -> Result<()> {
                     _ = sigint.recv() => {
                         tracing::info!("received SIGINT");
                     }
-                    result = async_parent_pidfd.readable() => {
+                    result = async_parent_pidfd.readable(), if !managed_mode => {
                         match result {
                             Ok(_guard) => tracing::info!("parent process exited, shutting down"),
                             Err(err) => tracing::warn!(?err, "parent pidfd error, shutting down"),

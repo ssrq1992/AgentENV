@@ -30,6 +30,7 @@ where
     E: std::fmt::Debug + Send + Sync + 'static,
     C: Send + Sync + 'static,
 {
+    crate::sandbox::storage::artifact_gc::start();
     // Keep the generated control-plane API as the primary router, then merge in
     // the hand-written `/proxy/*` entrypoints needed for the temporary reverse
     // proxy contract.
@@ -37,6 +38,7 @@ where
         .route_layer(middleware::from_fn(optional_connect_body))
         .merge(proxy::router(api_impl.clone()))
         .merge(super::impls::image_build::router(api_impl.clone()))
+        .merge(super::impls::storage::router(api_impl.clone()))
         .route("/metrics", get(metrics_handler))
         .layer(middleware::from_fn_with_state(
             api_impl.clone(),

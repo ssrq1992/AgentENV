@@ -320,6 +320,9 @@ impl StartupCommand {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CommittedSnapshot {
+    /// Opaque provider checkpoint projection; never contains a run ticket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_checkpoint: Option<serde_json::Value>,
     pub context: CommandContext,
     pub startup: Option<StartupCommand>,
     pub runtime_versions: SnapshotRuntimeVersions,
@@ -369,6 +372,7 @@ impl CommittedSnapshot {
             disk_publications: Vec::new(),
             custom_extension_params: None,
             memory_startup: None,
+            storage_checkpoint: None,
         }
     }
 }
@@ -466,26 +470,7 @@ fn now_unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OverlaybdLayerRef {
-    Managed(ManagedLayer),
-    External(ExternalLayer),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManagedLayer {
-    pub digest: String,
-    pub size: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub uuid: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExternalLayer {
-    pub digest: String,
-    pub repo_blob_url: String,
-    pub size: u64,
-}
+pub use aenv_volume_core::{ExternalLayer, ManagedLayer, OverlaybdLayerRef};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedDiskImagePublication {
@@ -602,11 +587,25 @@ impl RunnableSnapshot {
             .map(ResolvedAttachedDrive::to_extra_drive)
             .collect();
 
+        let mut manifest = SandboxSnapshotManifest::for_test(0, &extra_drives);
+        manifest.storage_checkpoint = record
+            .committed
+            .as_ref()
+            .and_then(|c| c.storage_checkpoint.clone());
         Self {
             record,
-            manifest: SandboxSnapshotManifest::for_test(0, &extra_drives),
+            manifest,
             _lease: default_runtime_artifact_lease(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_storage_layout(
+        mut self,
+        layout: std::collections::BTreeMap<String, usize>,
+    ) -> Self {
+        self.manifest.storage_slot_layout = layout;
+        self
     }
 
     #[cfg(test)]

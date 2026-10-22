@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use overlaybd::LayerDescriptor;
 use overlaybd::config::UpperMode;
 use overlaybd::index_file::DataStat;
-use overlaybd::LayerDescriptor;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
@@ -16,6 +16,14 @@ const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DaemonRequest {
+    ManagedCapabilities,
+    ExpandManagedVolume {
+        plan: ManagedExpansionPlan,
+    },
+    ManagedDevice {
+        plan: ManagedDevicePlan,
+        action: ManagedDeviceAction,
+    },
     /// Create a raw overlaybd ublk device from an already-materialized image
     /// config. This does not create runtime upper files or rewrite image.json.
     /// Sandbox rootfs and extra drives should use
@@ -157,6 +165,19 @@ pub enum PackRecordingState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum DaemonResponse {
+    ManagedCapabilities {
+        protocol: String,
+        capabilities: Vec<String>,
+    },
+    ManagedExpansion {
+        view: ManagedExpansionView,
+    },
+    ManagedCapture {
+        capture: ManagedCaptureView,
+    },
+    ManagedDevice {
+        view: ManagedDeviceView,
+    },
     DeviceCreated {
         dev_id: u32,
         device_path: PathBuf,
@@ -200,6 +221,33 @@ pub enum DaemonResponse {
     Error {
         message: String,
     },
+}
+
+/// A maintenance operation has no sandbox, run, RuntimeReady or stop evidence.
+/// The private host supplies authority obtained from the common offline fence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedExpansionPlan {
+    pub operation_id: String,
+    pub repository_id: String,
+    pub volume_id: String,
+    pub authorization_digest: String,
+    pub expected_head: String,
+    pub source_capacity: u64,
+    pub target_capacity: u64,
+    pub filesystem_uuid: String,
+    pub source_image_config: PathBuf,
+    pub runtime_dir: PathBuf,
+    pub global_config: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedExpansionView {
+    pub operation_id: String,
+    pub image_config_path: PathBuf,
+    pub capacity_bytes: u64,
+    pub filesystem_uuid: String,
+    pub device_identity: String,
+    pub device_released: bool,
 }
 
 // ── Wire helpers ────────────────────────────────────────────────────────────
@@ -816,4 +864,66 @@ mod tests {
 
         sender.abort();
     }
+}
+
+/// Private managed-device contract. The restricted daemon socket is owned by
+/// the storage host; these fields never come from a public sandbox request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedDevicePlan {
+    pub purpose: String,
+    pub session_id: String,
+    pub operation_id: String,
+    pub repository_id: String,
+    pub volume_id: String,
+    pub owner_id: String,
+    pub run_id: String,
+    pub epoch: u64,
+    pub node_id: String,
+    pub head_revision: String,
+    pub source_image_config: PathBuf,
+    pub global_config: PathBuf,
+    pub runtime_dir: PathBuf,
+    pub read_only: bool,
+    pub virtual_size: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ManagedDeviceAction {
+    Capture {
+        capture_id: String,
+        barrier_id: String,
+        freeze_evidence_digest: String,
+        #[serde(default)]
+        stopped_evidence_digest: String,
+    },
+    Prepare,
+    Inspect,
+    Release {
+        preparation_release_digest: String,
+        stopped_evidence_digest: String,
+        borrowed_refs_released_digest: String,
+    },
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedDeviceView {
+    pub session_id: String,
+    pub state: String,
+    pub node_boot_id: String,
+    pub daemon_instance_id: String,
+    pub device_identity: String,
+    pub dev_id: Option<u32>,
+    pub device_path: Option<PathBuf>,
+    pub major: u64,
+    pub minor: u64,
+    pub actual_virtual_size: u64,
+    pub runtime_image_config_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedCaptureView {
+    pub capture_id: String,
+    pub barrier_id: String,
+    pub session_id: String,
+    pub device_identity: String,
+    pub image_config_path: PathBuf,
+    pub content_digest: String,
 }

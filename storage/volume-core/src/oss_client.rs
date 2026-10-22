@@ -1,0 +1,681 @@
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
+
+use anyhow::{Context, Result};
+use bytes::Bytes;
+use futures::{stream, TryStreamExt};
+use object_store_operator::{
+    build_object_store_operator, run_with_refresh, AddressingStyle, CachedCredentialSource,
+    CredentialSource, ObjectStoreOperatorConfig, ObjectStoreOperatorError, OperatorWithCredential,
+};
+use opendal::{Error as OpenDalError, ErrorKind as OpenDalErrorKind, Operator};
+use overlaybd::backend::oss::upload_file_streaming;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::RwLock;
+use tracing::info;
+use url::Url;
+
+use crate::metrics::MetricGuard;
+
+/// Multipart part size for streaming file uploads. S3/OSS caps a multipart
+/// upload at 10,000 parts, so this bounds the largest uploadable object
+/// (~625 GiB at 64 MiB). Must be passed explicitly to opendal via
+/// `writer_with().chunk()`: without it opendal falls back to the service's
+/// minimum multipart part size (5 MiB), capping uploads at ~50 GiB.
+///
+/// Note the memory cost, which is `(2 * UPLOAD_CONCURRENCY + 2) * CHUNK_SIZE`
+/// rather than the product of the two — **measured at 1040 MiB for these
+/// figures**. See `overlaybd::backend::oss::upload_file_streaming` for why.
+/// Deliberately left as it was when the upload loop moved there: shrinking it
+/// would also shrink the largest uploadable object.
+const CHUNK_SIZE: usize = 64 * 1024 * 1024;
+/// Number of multipart parts uploaded concurrently per file. A single
+/// sequential stream tops out at roughly 100 MB/s to the OSS internal
+/// endpoint; concurrent parts multiply effective throughput.
+const UPLOAD_CONCURRENCY: usize = 8;
+const OSS_OPERATION_DURATION: &str = "agentenv_snapshot_oss_operation_duration_seconds";
+
+/// Snapshot artifacts uploaded to OSS. Used as the `artifact` label on upload
+/// metrics and in upload completion logs so memory layers can be told apart
+/// from rootfs/attached-drive layers.
+#[derive(Clone, Copy, Debug)]
+pub enum OssUploadArtifact {
+    RootfsLayer,
+    AttachedDriveLayer,
+    MemoryLayer,
+    VmState,
+    FirecrackerManifest,
+    StartupPack,
+    CatalogRecord,
+    BuildLog,
+    Alias,
+}
+
+impl OssUploadArtifact {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RootfsLayer => "rootfs_layer",
+            Self::AttachedDriveLayer => "attached_drive_layer",
+            Self::MemoryLayer => "memory_layer",
+            Self::VmState => "vm_state",
+            Self::FirecrackerManifest => "manifest",
+            Self::StartupPack => "startup_pack",
+            Self::CatalogRecord => "record",
+            Self::BuildLog => "build_log",
+            Self::Alias => "alias",
+        }
+    }
+}
+
+/// Thin wrapper around the OSS client used by the repository and resolver.
+#[derive(Clone, Debug)]
+pub struct OssClient {
+    operator_config: ObjectStoreOperatorConfig,
+    prefix: String,
+    credentials: Arc<CachedCredentialSource>,
+    cached_operator: Arc<RwLock<Option<OperatorWithCredential>>>,
+}
+
+impl OssClient {
+    pub fn storage_identity(&self) -> String {
+        let descriptor = serde_json::json!([
+            "oss",
+            self.operator_config.endpoint,
+            self.operator_config.bucket,
+            self.prefix
+        ]);
+        crate::digest::sha256_digest(descriptor.to_string().as_bytes())
+            .trim_start_matches("sha256:")
+            .to_owned()
+    }
+
+    pub fn new(
+        bucket: String,
+        endpoint: String,
+        region: String,
+        prefix: String,
+        credential_source: CredentialSource,
+        addressing_override: Option<AddressingStyle>,
+    ) -> Result<Self> {
+        // Detection also validates the endpoint URL, so it always runs; an
+        // explicit config override then wins over the detected style.
+        let detected_style = detect_addressing_style(&endpoint, &bucket)?;
+        let addressing_style = addressing_override.unwrap_or(detected_style);
+        Ok(Self {
+            operator_config: ObjectStoreOperatorConfig {
+                addressing_style,
+                bucket,
+                endpoint,
+                region,
+                timeout: None,
+                max_retries: None,
+            },
+            prefix,
+            credentials: Arc::new(CachedCredentialSource::new(credential_source)),
+            cached_operator: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    fn full_key(&self, key: &str) -> String {
+        if self.prefix.is_empty() {
+            key.to_string()
+        } else {
+            format!("{}/{}", self.prefix, key)
+        }
+    }
+
+    pub fn managed_layers_repo_blob_url(&self) -> String {
+        // overlaybd expects an S3-compatible repo blob URL here, including for
+        // Alibaba OSS, so the scheme remains `s3://` rather than `oss://`.
+        if self.prefix.is_empty() {
+            format!("s3://{}/managed-layers", self.operator_config.bucket)
+        } else {
+            format!(
+                "s3://{}/{}/managed-layers",
+                self.operator_config.bucket, self.prefix
+            )
+        }
+    }
+
+    /// Repository-relative object URL used by native artifact projections.
+    pub fn object_url(&self, key: &str) -> String {
+        format!(
+            "s3://{}/{}",
+            self.operator_config.bucket,
+            self.full_key(key)
+        )
+    }
+
+    /// Read a small object entirely into memory.
+    pub async fn get_bytes(&self, key: &str) -> Result<Bytes> {
+        let mut metric = MetricGuard::operation(OSS_OPERATION_DURATION, "get_bytes");
+        let result = self
+            .run_with_key(key, |operator, key| async move {
+                operator.read(&key).await.map(|buffer| buffer.to_bytes())
+            })
+            .await
+            .with_context(|| format!("oss get '{key}'"));
+        metric.finish(&result);
+        result
+    }
+
+    /// Reads a small object together with its backend version token for a
+    /// conditional update.
+    pub async fn get_bytes_with_etag(&self, key: &str) -> Result<(Bytes, Option<String>)> {
+        self.run_with_key(key, |operator, key| async move {
+            for _attempt in 0..5 {
+                let metadata = operator.stat(&key).await?;
+                let etag = metadata.etag().map(str::to_owned);
+                let read = match etag.as_deref() {
+                    Some(etag) => operator.read_with(&key).if_match(etag).await,
+                    None => operator.read(&key).await,
+                };
+                match read {
+                    Ok(bytes) => return Ok((bytes.to_bytes(), etag)),
+                    Err(error) if error.kind() == OpenDalErrorKind::ConditionNotMatch => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(OpenDalError::new(
+                OpenDalErrorKind::Unexpected,
+                "object changed too often while reading its version",
+            ))
+        })
+        .await
+        .with_context(|| format!("oss get versioned object '{key}'"))
+    }
+
+    /// Download an object directly to a local file (atomic: temp + rename).
+    pub async fn get_to_file(&self, key: &str, dest: &Path) -> Result<u64> {
+        let mut metric = MetricGuard::operation(OSS_OPERATION_DURATION, "get_to_file");
+        if let Some(parent) = dest.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("create cache dir '{}'", parent.display()))?;
+        }
+
+        let dest = dest.to_path_buf();
+        let oss_key = self.full_key(key);
+        let result = self
+            .run_with_operator(|operator| {
+                let dest = dest.clone();
+                let oss_key = oss_key.clone();
+                async move { download_object_to_file(&operator, &oss_key, &dest).await }
+            })
+            .await
+            .with_context(|| format!("oss download '{key}'"));
+        metric.finish(&result);
+        result
+    }
+
+    /// Check whether an object exists.
+    pub async fn exists(&self, key: &str) -> Result<bool> {
+        let mut metric = MetricGuard::operation(OSS_OPERATION_DURATION, "exists");
+        let result = self
+            .run_with_key(
+                key,
+                |operator, key| async move { operator.exists(&key).await },
+            )
+            .await
+            .with_context(|| format!("oss exists '{key}'"));
+        metric.finish(&result);
+        result
+    }
+
+    /// List all files recursively under a prefix.
+    pub async fn list_keys_recursive(&self, prefix: &str) -> Result<Vec<String>> {
+        let keys = self
+            .run_with_key(prefix, |operator, prefix| async move {
+                let entries = operator.list_with(&prefix).recursive(true).await?;
+
+                Ok(entries
+                    .into_iter()
+                    .filter(|entry| !entry.metadata().mode().is_dir())
+                    .map(|entry| entry.path().to_string())
+                    .collect())
+            })
+            .await
+            .with_context(|| format!("oss list '{prefix}'"))?;
+
+        if self.prefix.is_empty() {
+            return Ok(keys);
+        }
+        let strip = format!("{}/", self.prefix);
+        Ok(keys
+            .into_iter()
+            .map(|p| p.strip_prefix(&strip).unwrap_or(&p).to_string())
+            .collect())
+    }
+
+    /// Lists at most `limit` files after a repository-relative key.
+    pub async fn list_keys_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let full_prefix = self.full_key(prefix);
+        let full_start_after = start_after.map(|key| self.full_key(key));
+        let keys = self
+            .run_with_operator(|operator| {
+                let full_prefix = full_prefix.clone();
+                let full_start_after = full_start_after.clone();
+                async move {
+                    let builder = operator
+                        .lister_with(&full_prefix)
+                        .recursive(true)
+                        .limit(limit);
+                    let mut lister = match full_start_after.as_deref() {
+                        Some(key) => builder.start_after(key).await?,
+                        None => builder.await?,
+                    };
+                    let mut keys = Vec::with_capacity(limit);
+                    while keys.len() < limit {
+                        let Some(entry) = lister.try_next().await? else {
+                            break;
+                        };
+                        if !entry.metadata().mode().is_dir() {
+                            keys.push(entry.path().to_string());
+                        }
+                    }
+                    Ok(keys)
+                }
+            })
+            .await
+            .with_context(|| format!("oss list page '{prefix}'"))?;
+
+        if self.prefix.is_empty() {
+            return Ok(keys);
+        }
+        let strip = format!("{}/", self.prefix);
+        Ok(keys
+            .into_iter()
+            .map(|key| key.strip_prefix(&strip).unwrap_or(&key).to_string())
+            .collect())
+    }
+
+    /// Write small data (catalog JSON, alias JSON, etc.).
+    pub async fn put_bytes(
+        &self,
+        key: &str,
+        data: impl Into<Bytes>,
+        artifact: OssUploadArtifact,
+    ) -> Result<()> {
+        let data = data.into();
+        let size = data.len() as u64;
+        let oss_key = self.full_key(key);
+        let mut metric =
+            MetricGuard::operation_artifact(OSS_OPERATION_DURATION, "put_bytes", artifact.as_str());
+        let result = self
+            .run_with_operator(|operator| {
+                let data = data.clone();
+                let oss_key = oss_key.clone();
+                async move { write_bytes_to_operator(&operator, &oss_key, data).await }
+            })
+            .await
+            .with_context(|| format!("oss put '{key}'"));
+        metric.finish(&result);
+        if result.is_ok() {
+            metrics::counter!(
+                "agentenv_snapshot_oss_upload_bytes_total",
+                "operation" => "put_bytes",
+                "artifact" => artifact.as_str(),
+            )
+            .increment(size);
+        }
+        result?;
+        Ok(())
+    }
+
+    /// Conditionally writes a small object. `etag = None` means the object
+    /// must not already exist. A failed condition returns `Ok(false)`.
+    pub async fn put_bytes_conditionally(
+        &self,
+        key: &str,
+        data: impl Into<Bytes>,
+        etag: Option<&str>,
+    ) -> Result<bool> {
+        let data = data.into();
+        let oss_key = self.full_key(key);
+        self.run_with_operator(|operator| {
+            let data = data.clone();
+            let oss_key = oss_key.clone();
+            let etag = etag.map(str::to_owned);
+            async move {
+                let write = operator.write_with(&oss_key, data);
+                let result = match etag.as_deref() {
+                    Some(etag) => write.if_match(etag).await,
+                    None => write.if_none_match("*").await,
+                };
+                match result {
+                    Ok(_) => Ok(true),
+                    Err(error) if error.kind() == OpenDalErrorKind::ConditionNotMatch => Ok(false),
+                    Err(error) => Err(error),
+                }
+            }
+        })
+        .await
+        .with_context(|| format!("oss conditional put '{key}'"))
+    }
+
+    /// Upload a local file to OSS.
+    pub async fn put_file(
+        &self,
+        key: &str,
+        path: &Path,
+        artifact: OssUploadArtifact,
+    ) -> Result<()> {
+        let oss_key = self.full_key(key);
+        let path = path.to_path_buf();
+        let mut metric =
+            MetricGuard::operation_artifact(OSS_OPERATION_DURATION, "put_file", artifact.as_str());
+        let start = Instant::now();
+        let result: Result<u64> = async {
+            let size = tokio::fs::metadata(&path)
+                .await
+                .with_context(|| format!("stat oss upload source file '{}'", path.display()))?
+                .len();
+            self.run_with_operator(|operator| {
+                let oss_key = oss_key.clone();
+                let path = path.clone();
+                async move {
+                    upload_file_streaming(
+                        &operator,
+                        &oss_key,
+                        &path,
+                        CHUNK_SIZE,
+                        UPLOAD_CONCURRENCY,
+                        None,
+                    )
+                    .await
+                }
+            })
+            .await
+            .with_context(|| format!("oss put file '{key}'"))?;
+            Ok(size)
+        }
+        .await;
+        metric.finish(&result);
+        match result {
+            Ok(size) => {
+                metrics::counter!(
+                    "agentenv_snapshot_oss_upload_bytes_total",
+                    "operation" => "put_file",
+                    "artifact" => artifact.as_str(),
+                )
+                .increment(size);
+                info!(
+                    key = %oss_key,
+                    artifact = artifact.as_str(),
+                    size_bytes = size,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    "oss file uploaded"
+                );
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Delete a single object. Idempotent – missing objects are not errors.
+    pub async fn delete(&self, key: &str) -> Result<()> {
+        self.run_with_key(key, |operator, key| async move {
+            match operator.delete(&key).await {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == OpenDalErrorKind::NotFound => Ok(()),
+                Err(err) => Err(err),
+            }
+        })
+        .await
+        .with_context(|| format!("oss delete '{key}'"))
+    }
+
+    /// Delete all objects under a prefix.
+    pub async fn delete_prefix(&self, prefix: &str) -> Result<()> {
+        // `list_keys_recursive()` returns repository-relative keys with the
+        // configured backend prefix stripped, while `delete()` expects that
+        // same repository-relative form and re-applies the backend prefix.
+        let keys = self.list_keys_recursive(prefix).await?;
+        stream::iter(keys.into_iter().map(Ok::<_, anyhow::Error>))
+            .try_for_each_concurrent(16, |key| async move { self.delete(&key).await })
+            .await
+    }
+
+    pub fn is_not_found_error(error: &anyhow::Error) -> bool {
+        error.chain().any(|cause| {
+            if let Some(opendal_error) = cause.downcast_ref::<OpenDalError>() {
+                return opendal_error.kind() == OpenDalErrorKind::NotFound;
+            }
+            if let Some(ObjectStoreOperatorError::OpenDal(opendal_error)) =
+                cause.downcast_ref::<ObjectStoreOperatorError>()
+            {
+                return opendal_error.kind() == OpenDalErrorKind::NotFound;
+            }
+            false
+        })
+    }
+
+    async fn run_with_key<T, F, Fut>(&self, key: &str, operation: F) -> Result<T>
+    where
+        F: Fn(Operator, String) -> Fut,
+        Fut: std::future::Future<Output = opendal::Result<T>>,
+    {
+        let key = self.full_key(key);
+        self.run_with_operator(|operator| {
+            let key = key.clone();
+            operation(operator, key)
+        })
+        .await
+    }
+
+    async fn run_with_operator<T, F, Fut>(&self, operation: F) -> Result<T>
+    where
+        F: Fn(Operator) -> Fut,
+        Fut: std::future::Future<Output = opendal::Result<T>>,
+    {
+        // Centralizes one-shot operator construction plus credential-refresh
+        // retry semantics so individual OSS operations don't each have to
+        // reason about cached credentials and operator replacement.
+        let current = self.ensure_fresh_operator().await?;
+        let (value, refreshed) = run_with_refresh(
+            &current,
+            Some(self.credentials.as_ref()),
+            &self.operator_config,
+            operation,
+        )
+        .await
+        .map_err(anyhow::Error::from)?;
+        if let Some(refreshed) = refreshed {
+            *self.cached_operator.write().await = Some(refreshed);
+        }
+        Ok(value)
+    }
+
+    async fn ensure_fresh_operator(&self) -> Result<OperatorWithCredential> {
+        let credential = self.credentials.current().await?.ok_or_else(|| {
+            anyhow::anyhow!("snapshot OSS client requires non-anonymous credentials")
+        })?;
+
+        {
+            let cached = self.cached_operator.read().await;
+            if let Some(state) = cached.as_ref() {
+                if state.credential() == Some(&credential) {
+                    return Ok(state.clone());
+                }
+            }
+        }
+
+        let entry = OperatorWithCredential::new(
+            build_object_store_operator(&self.operator_config, Some(&credential))?,
+            Some(credential),
+        );
+        *self.cached_operator.write().await = Some(entry.clone());
+        Ok(entry)
+    }
+}
+
+fn detect_addressing_style(endpoint: &str, bucket: &str) -> Result<AddressingStyle> {
+    let url = Url::parse(endpoint).context("parse snapshot OSS endpoint for addressing style")?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("snapshot OSS endpoint host is missing"))?;
+    let bucket_host = format!("{bucket}.");
+    let is_bucket_virtual_host = host.starts_with(&bucket_host);
+    let is_aliyun_endpoint = host.ends_with(".aliyuncs.com") || host.ends_with(".aliyun-inc.com");
+
+    if is_bucket_virtual_host {
+        return Ok(AddressingStyle::Virtual);
+    }
+    if is_aliyun_endpoint {
+        return Ok(AddressingStyle::Virtual);
+    }
+    Ok(AddressingStyle::Path)
+}
+
+async fn download_object_to_file(
+    operator: &Operator,
+    key: &str,
+    dest: &Path,
+) -> opendal::Result<u64> {
+    // Keep the tempfile handle alive until the final rename so any early
+    // return still benefits from `NamedTempFile`'s automatic cleanup.
+    let tmp = tempfile::NamedTempFile::new_in(dest.parent().unwrap_or_else(|| Path::new(".")))
+        .map_err(|err| io_error_to_opendal(err, "create temporary download file"))?;
+    let tmp_path = tmp.path().to_path_buf();
+    let std_file = tmp
+        .reopen()
+        .map_err(|err| io_error_to_opendal(err, "reopen temporary download file"))?;
+    let mut file = tokio::fs::File::from_std(std_file);
+    let mut size = 0_u64;
+    let mut stream = operator.reader(key).await?.into_stream(..).await?;
+    while let Some(buffer) = stream.try_next().await? {
+        for chunk in buffer {
+            size += chunk.len() as u64;
+            file.write_all(chunk.as_ref())
+                .await
+                .map_err(|err| io_error_to_opendal(err, "write downloaded object chunk"))?;
+        }
+    }
+
+    file.flush()
+        .await
+        .map_err(|err| io_error_to_opendal(err, "flush downloaded object file"))?;
+    file.sync_all()
+        .await
+        .map_err(|err| io_error_to_opendal(err, "sync downloaded object file"))?;
+    drop(file);
+    tokio::fs::rename(&tmp_path, dest)
+        .await
+        .map_err(|err| io_error_to_opendal(err, "rename downloaded object into place"))?;
+
+    Ok(size)
+}
+
+async fn write_bytes_to_operator(
+    operator: &Operator,
+    key: &str,
+    data: Bytes,
+) -> opendal::Result<()> {
+    operator.write(key, data).await.map(|_| ())
+}
+
+fn io_error_to_opendal(error: std::io::Error, message: &'static str) -> OpenDalError {
+    OpenDalError::new(OpenDalErrorKind::Unexpected, message).set_source(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OssClient;
+    use object_store_operator::{AddressingStyle, CredentialSource};
+
+    #[test]
+    fn explicit_override_takes_precedence_over_detection() {
+        let detected = OssClient::new(
+            "snapshots".to_string(),
+            "https://t3.storage.dev".to_string(),
+            "auto".to_string(),
+            String::new(),
+            CredentialSource::Anonymous,
+            None,
+        )
+        .expect("build client with detected style");
+        assert_eq!(
+            detected.operator_config.addressing_style,
+            AddressingStyle::Path
+        );
+
+        let overridden = OssClient::new(
+            "snapshots".to_string(),
+            "https://t3.storage.dev".to_string(),
+            "auto".to_string(),
+            String::new(),
+            CredentialSource::Anonymous,
+            Some(AddressingStyle::Virtual),
+        )
+        .expect("build client with override");
+        assert_eq!(
+            overridden.operator_config.addressing_style,
+            AddressingStyle::Virtual
+        );
+    }
+
+    #[test]
+    fn explicit_override_still_validates_endpoint() {
+        OssClient::new(
+            "snapshots".to_string(),
+            "not a valid endpoint".to_string(),
+            "auto".to_string(),
+            String::new(),
+            CredentialSource::Anonymous,
+            Some(AddressingStyle::Virtual),
+        )
+        .expect_err("malformed endpoint must fail even with an explicit override");
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::object::VolumeObjectStore for OssClient {
+    fn is_not_found_error(error: &anyhow::Error) -> bool {
+        OssClient::is_not_found_error(error)
+    }
+    async fn get_bytes(&self, key: &str) -> Result<Vec<u8>> {
+        Ok(OssClient::get_bytes(self, key).await?.to_vec())
+    }
+    async fn get_bytes_with_etag(&self, key: &str) -> Result<(Vec<u8>, Option<String>)> {
+        let (bytes, etag) = OssClient::get_bytes_with_etag(self, key).await?;
+        Ok((bytes.to_vec(), etag))
+    }
+    async fn exists(&self, key: &str) -> Result<bool> {
+        OssClient::exists(self, key).await
+    }
+    async fn list_keys_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        OssClient::list_keys_page(self, prefix, start_after, limit).await
+    }
+    async fn put_bytes_conditionally(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        etag: Option<&str>,
+    ) -> Result<bool> {
+        OssClient::put_bytes_conditionally(self, key, bytes, etag).await
+    }
+    async fn delete(&self, key: &str) -> Result<()> {
+        OssClient::delete(self, key).await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::object_layers::ObjectLayerTransport for OssClient {
+    async fn exists(&self, key: &str) -> anyhow::Result<bool> {
+        OssClient::exists(self, key).await
+    }
+    async fn put_file(&self, key: &str, path: &std::path::Path) -> anyhow::Result<()> {
+        OssClient::put_file(self, key, path, OssUploadArtifact::AttachedDriveLayer).await
+    }
+}

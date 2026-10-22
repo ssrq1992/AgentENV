@@ -425,6 +425,12 @@ pub struct VolumesVolumeIdDeletePathParams {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct VolumesVolumeIdExpandPostPathParams {
+    pub volume_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct VolumesVolumeIdGetPathParams {
     pub volume_id: String,
 }
@@ -2051,6 +2057,140 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<Error> {
                     r#"Unable to convert header value '{value}' into Error - {err}"#
                 )),
             },
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Unable to convert header: {hdr_value:?} to string: {e}"#
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct ExpandVolume {
+    /// Requested offline capacity in MiB; shrinking is forbidden.
+    #[serde(rename = "sizeMB")]
+    #[validate(range(min = 1u64))]
+    pub size_mb: u64,
+}
+
+impl ExpandVolume {
+    #[allow(clippy::new_without_default, clippy::too_many_arguments)]
+    pub fn new(size_mb: u64) -> ExpandVolume {
+        ExpandVolume { size_mb }
+    }
+}
+
+/// Converts the ExpandVolume value to the Query Parameters representation (style=form, explode=false)
+/// specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde serializer
+impl std::fmt::Display for ExpandVolume {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let params: Vec<Option<String>> =
+            vec![Some("sizeMB".to_string()), Some(self.size_mb.to_string())];
+
+        write!(
+            f,
+            "{}",
+            params.into_iter().flatten().collect::<Vec<_>>().join(",")
+        )
+    }
+}
+
+/// Converts Query Parameters representation (style=form, explode=false) to a ExpandVolume value
+/// as specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde deserializer
+impl std::str::FromStr for ExpandVolume {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        /// An intermediate representation of the struct to use for parsing.
+        #[derive(Default)]
+        #[allow(dead_code)]
+        struct IntermediateRep {
+            pub size_mb: Vec<u64>,
+        }
+
+        let mut intermediate_rep = IntermediateRep::default();
+
+        // Parse into intermediate representation
+        let mut string_iter = s.split(',');
+        let mut key_result = string_iter.next();
+
+        while key_result.is_some() {
+            let val = match string_iter.next() {
+                Some(x) => x,
+                None => {
+                    return std::result::Result::Err(
+                        "Missing value while parsing ExpandVolume".to_string(),
+                    );
+                }
+            };
+
+            if let Some(key) = key_result {
+                #[allow(clippy::match_single_binding)]
+                match key {
+                    #[allow(clippy::redundant_clone)]
+                    "sizeMB" => intermediate_rep.size_mb.push(
+                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    _ => {
+                        return std::result::Result::Err(
+                            "Unexpected key while parsing ExpandVolume".to_string(),
+                        );
+                    }
+                }
+            }
+
+            // Get the next key
+            key_result = string_iter.next();
+        }
+
+        // Use the intermediate representation to return the struct
+        std::result::Result::Ok(ExpandVolume {
+            size_mb: intermediate_rep
+                .size_mb
+                .into_iter()
+                .next()
+                .ok_or_else(|| "sizeMB missing in ExpandVolume".to_string())?,
+        })
+    }
+}
+
+// Methods for converting between header::IntoHeaderValue<ExpandVolume> and HeaderValue
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<header::IntoHeaderValue<ExpandVolume>> for HeaderValue {
+    type Error = String;
+
+    fn try_from(
+        hdr_value: header::IntoHeaderValue<ExpandVolume>,
+    ) -> std::result::Result<Self, Self::Error> {
+        let hdr_value = hdr_value.to_string();
+        match HeaderValue::from_str(&hdr_value) {
+            std::result::Result::Ok(value) => std::result::Result::Ok(value),
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Invalid header value for ExpandVolume - value: {hdr_value} is invalid {e}"#
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<ExpandVolume> {
+    type Error = String;
+
+    fn try_from(hdr_value: HeaderValue) -> std::result::Result<Self, Self::Error> {
+        match hdr_value.to_str() {
+            std::result::Result::Ok(value) => {
+                match <ExpandVolume as std::str::FromStr>::from_str(value) {
+                    std::result::Result::Ok(value) => {
+                        std::result::Result::Ok(header::IntoHeaderValue(value))
+                    }
+                    std::result::Result::Err(err) => std::result::Result::Err(format!(
+                        r#"Unable to convert header value '{value}' into ExpandVolume - {err}"#
+                    )),
+                }
+            }
             std::result::Result::Err(e) => std::result::Result::Err(format!(
                 r#"Unable to convert header: {hdr_value:?} to string: {e}"#
             )),
@@ -3879,6 +4019,18 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<NewSandboxV2
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct NewVolume {
+    /// Optional storage provider. Omitted or legacy uses the original volume manager.
+    #[serde(rename = "provider")]
+    #[validate(custom(function = "check_xss_string"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+
+    /// Provider-specific storage options. SSF accepts namespace, storageClass, snapshotClass and import (namespace, name, uid). Import never formats an existing device. Provider failures never fall back to an empty legacy volume.
+    #[serde(rename = "storage")]
+    #[validate(custom(function = "check_xss_map"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<std::collections::HashMap<String, crate::types::Object>>,
+
     /// Name of the volume
     #[serde(rename = "name")]
     #[validate(
@@ -3920,6 +4072,8 @@ impl NewVolume {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new(name: String) -> NewVolume {
         NewVolume {
+            provider: None,
+            storage: None,
             name,
             size_mb: Some(65536),
             mode: None,
@@ -3935,6 +4089,11 @@ impl NewVolume {
 impl std::fmt::Display for NewVolume {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            self.provider
+                .as_ref()
+                .map(|provider| ["provider".to_string(), provider.to_string()].join(",")),
+            // Skipping storage in query parameter serialization
+            // Skipping storage in query parameter serialization
             Some("name".to_string()),
             Some(self.name.to_string()),
             self.size_mb
@@ -3970,6 +4129,8 @@ impl std::str::FromStr for NewVolume {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub provider: Vec<String>,
+            pub storage: Vec<std::collections::HashMap<String, crate::types::Object>>,
             pub name: Vec<String>,
             pub size_mb: Vec<u64>,
             pub mode: Vec<String>,
@@ -3996,6 +4157,16 @@ impl std::str::FromStr for NewVolume {
             if let Some(key) = key_result {
                 #[allow(clippy::match_single_binding)]
                 match key {
+                    #[allow(clippy::redundant_clone)]
+                    "provider" => intermediate_rep.provider.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    "storage" => {
+                        return std::result::Result::Err(
+                            "Parsing a container in this style is not supported in NewVolume"
+                                .to_string(),
+                        );
+                    }
                     #[allow(clippy::redundant_clone)]
                     "name" => intermediate_rep.name.push(
                         <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
@@ -4030,6 +4201,8 @@ impl std::str::FromStr for NewVolume {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(NewVolume {
+            provider: intermediate_rep.provider.into_iter().next(),
+            storage: intermediate_rep.storage.into_iter().next(),
             name: intermediate_rep
                 .name
                 .into_iter()
@@ -7370,6 +7543,161 @@ impl std::str::FromStr for SandboxOnTimeout {
     }
 }
 
+/// Kubernetes PVC source. The storage provider authorizes the namespace and pins immutable identity.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct SandboxPvcSource {
+    /// Namespace, or the explicitly configured deployment default when omitted.
+    #[serde(rename = "namespace")]
+    #[validate(custom(function = "check_xss_string"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+
+    /// PVC name.
+    #[serde(rename = "name")]
+    #[validate(custom(function = "check_xss_string"))]
+    pub name: String,
+}
+
+impl SandboxPvcSource {
+    #[allow(clippy::new_without_default, clippy::too_many_arguments)]
+    pub fn new(name: String) -> SandboxPvcSource {
+        SandboxPvcSource {
+            namespace: None,
+            name,
+        }
+    }
+}
+
+/// Converts the SandboxPvcSource value to the Query Parameters representation (style=form, explode=false)
+/// specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde serializer
+impl std::fmt::Display for SandboxPvcSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let params: Vec<Option<String>> = vec![
+            self.namespace
+                .as_ref()
+                .map(|namespace| ["namespace".to_string(), namespace.to_string()].join(",")),
+            Some("name".to_string()),
+            Some(self.name.to_string()),
+        ];
+
+        write!(
+            f,
+            "{}",
+            params.into_iter().flatten().collect::<Vec<_>>().join(",")
+        )
+    }
+}
+
+/// Converts Query Parameters representation (style=form, explode=false) to a SandboxPvcSource value
+/// as specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde deserializer
+impl std::str::FromStr for SandboxPvcSource {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        /// An intermediate representation of the struct to use for parsing.
+        #[derive(Default)]
+        #[allow(dead_code)]
+        struct IntermediateRep {
+            pub namespace: Vec<String>,
+            pub name: Vec<String>,
+        }
+
+        let mut intermediate_rep = IntermediateRep::default();
+
+        // Parse into intermediate representation
+        let mut string_iter = s.split(',');
+        let mut key_result = string_iter.next();
+
+        while key_result.is_some() {
+            let val = match string_iter.next() {
+                Some(x) => x,
+                None => {
+                    return std::result::Result::Err(
+                        "Missing value while parsing SandboxPvcSource".to_string(),
+                    );
+                }
+            };
+
+            if let Some(key) = key_result {
+                #[allow(clippy::match_single_binding)]
+                match key {
+                    #[allow(clippy::redundant_clone)]
+                    "namespace" => intermediate_rep.namespace.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "name" => intermediate_rep.name.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    _ => {
+                        return std::result::Result::Err(
+                            "Unexpected key while parsing SandboxPvcSource".to_string(),
+                        );
+                    }
+                }
+            }
+
+            // Get the next key
+            key_result = string_iter.next();
+        }
+
+        // Use the intermediate representation to return the struct
+        std::result::Result::Ok(SandboxPvcSource {
+            namespace: intermediate_rep.namespace.into_iter().next(),
+            name: intermediate_rep
+                .name
+                .into_iter()
+                .next()
+                .ok_or_else(|| "name missing in SandboxPvcSource".to_string())?,
+        })
+    }
+}
+
+// Methods for converting between header::IntoHeaderValue<SandboxPvcSource> and HeaderValue
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<header::IntoHeaderValue<SandboxPvcSource>> for HeaderValue {
+    type Error = String;
+
+    fn try_from(
+        hdr_value: header::IntoHeaderValue<SandboxPvcSource>,
+    ) -> std::result::Result<Self, Self::Error> {
+        let hdr_value = hdr_value.to_string();
+        match HeaderValue::from_str(&hdr_value) {
+            std::result::Result::Ok(value) => std::result::Result::Ok(value),
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Invalid header value for SandboxPvcSource - value: {hdr_value} is invalid {e}"#
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<SandboxPvcSource> {
+    type Error = String;
+
+    fn try_from(hdr_value: HeaderValue) -> std::result::Result<Self, Self::Error> {
+        match hdr_value.to_str() {
+            std::result::Result::Ok(value) => {
+                match <SandboxPvcSource as std::str::FromStr>::from_str(value) {
+                    std::result::Result::Ok(value) => {
+                        std::result::Result::Ok(header::IntoHeaderValue(value))
+                    }
+                    std::result::Result::Err(err) => std::result::Result::Err(format!(
+                        r#"Unable to convert header value '{value}' into SandboxPvcSource - {err}"#
+                    )),
+                }
+            }
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Unable to convert header: {hdr_value:?} to string: {e}"#
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct SandboxRefreshRequest {
@@ -7816,13 +8144,20 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<SandboxTimeo
     }
 }
 
+/// Provide exactly one of name and pvc. PVC references require the enabled storage provider.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct SandboxVolumeMount {
     /// Name of the volume
     #[serde(rename = "name")]
     #[validate(custom(function = "check_xss_string"))]
-    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    #[serde(rename = "pvc")]
+    #[validate(nested)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pvc: Option<models::SandboxPvcSource>,
 
     /// Path of the volume
     #[serde(rename = "path")]
@@ -7832,8 +8167,12 @@ pub struct SandboxVolumeMount {
 
 impl SandboxVolumeMount {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
-    pub fn new(name: String, path: String) -> SandboxVolumeMount {
-        SandboxVolumeMount { name, path }
+    pub fn new(path: String) -> SandboxVolumeMount {
+        SandboxVolumeMount {
+            name: None,
+            pvc: None,
+            path,
+        }
     }
 }
 
@@ -7843,8 +8182,10 @@ impl SandboxVolumeMount {
 impl std::fmt::Display for SandboxVolumeMount {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
-            Some("name".to_string()),
-            Some(self.name.to_string()),
+            self.name
+                .as_ref()
+                .map(|name| ["name".to_string(), name.to_string()].join(",")),
+            // Skipping pvc in query parameter serialization
             Some("path".to_string()),
             Some(self.path.to_string()),
         ];
@@ -7869,6 +8210,7 @@ impl std::str::FromStr for SandboxVolumeMount {
         #[allow(dead_code)]
         struct IntermediateRep {
             pub name: Vec<String>,
+            pub pvc: Vec<models::SandboxPvcSource>,
             pub path: Vec<String>,
         }
 
@@ -7896,6 +8238,11 @@ impl std::str::FromStr for SandboxVolumeMount {
                         <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
                     ),
                     #[allow(clippy::redundant_clone)]
+                    "pvc" => intermediate_rep.pvc.push(
+                        <models::SandboxPvcSource as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
                     "path" => intermediate_rep.path.push(
                         <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
                     ),
@@ -7913,11 +8260,8 @@ impl std::str::FromStr for SandboxVolumeMount {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(SandboxVolumeMount {
-            name: intermediate_rep
-                .name
-                .into_iter()
-                .next()
-                .ok_or_else(|| "name missing in SandboxVolumeMount".to_string())?,
+            name: intermediate_rep.name.into_iter().next(),
+            pvc: intermediate_rep.pvc.into_iter().next(),
             path: intermediate_rep
                 .path
                 .into_iter()
@@ -10974,6 +11318,18 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<TemplateWith
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct Volume {
+    /// Storage provider identity; omitted by older servers. Legacy remains the default.
+    #[serde(rename = "provider")]
+    #[validate(custom(function = "check_xss_string"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+
+    /// Storage capabilities currently available for this volume.
+    #[serde(rename = "capabilities")]
+    #[validate(custom(function = "check_xss_map"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<std::collections::HashMap<String, bool>>,
+
     /// ID of the volume
     #[serde(rename = "volumeID")]
     #[validate(custom(function = "check_xss_string"))]
@@ -11010,6 +11366,8 @@ impl Volume {
         status: String,
     ) -> Volume {
         Volume {
+            provider: None,
+            capabilities: None,
             volume_id,
             name,
             mode,
@@ -11025,6 +11383,10 @@ impl Volume {
 impl std::fmt::Display for Volume {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            self.provider
+                .as_ref()
+                .map(|provider| ["provider".to_string(), provider.to_string()].join(",")),
+            // Skipping capabilities in query parameter serialization
             Some("volumeID".to_string()),
             Some(self.volume_id.to_string()),
             Some("name".to_string()),
@@ -11056,6 +11418,8 @@ impl std::str::FromStr for Volume {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub provider: Vec<String>,
+            pub capabilities: Vec<std::collections::HashMap<String, bool>>,
             pub volume_id: Vec<String>,
             pub name: Vec<String>,
             pub mode: Vec<String>,
@@ -11082,6 +11446,16 @@ impl std::str::FromStr for Volume {
             if let Some(key) = key_result {
                 #[allow(clippy::match_single_binding)]
                 match key {
+                    #[allow(clippy::redundant_clone)]
+                    "provider" => intermediate_rep.provider.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    "capabilities" => {
+                        return std::result::Result::Err(
+                            "Parsing a container in this style is not supported in Volume"
+                                .to_string(),
+                        );
+                    }
                     #[allow(clippy::redundant_clone)]
                     "volumeID" => intermediate_rep.volume_id.push(
                         <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
@@ -11116,6 +11490,8 @@ impl std::str::FromStr for Volume {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(Volume {
+            provider: intermediate_rep.provider.into_iter().next(),
+            capabilities: intermediate_rep.capabilities.into_iter().next(),
             volume_id: intermediate_rep
                 .volume_id
                 .into_iter()

@@ -43,13 +43,7 @@ pub struct SnapshotListFilter {
     pub template_statuses: Option<Vec<TemplateBuildStatus>>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct VolumeRecordPage {
-    pub records: Vec<crate::volume::VolumeRecord>,
-    /// The last returned volume ID. Supplying it to the next request resumes
-    /// after that record in the repository's stable shard-and-ID order.
-    pub next_volume_id: Option<String>,
-}
+pub use aenv_volume_core::VolumeRecordPage;
 
 fn unsupported<T>(feature: &str) -> RepositoryResult<T> {
     Err(RepositoryError::Unsupported {
@@ -138,6 +132,11 @@ impl SnapshotListFilter {
 /// - shared artifact imports should use atomic protocols so concurrent writers do not expose
 ///   half-written managed layers
 pub trait SnapshotRepository: Send + Sync {
+    /// Stable identity of the authoritative catalog, not its node-local cache.
+    async fn storage_identity(&self) -> RepositoryResult<String> {
+        unsupported("storage repository identity")
+    }
+
     /// Creates a durable template snapshot record before build artifacts exist.
     ///
     /// Backends should reject records that already contain a committed artifact payload and should

@@ -61,3 +61,16 @@ impl RepositoryError {
         }
     }
 }
+
+impl From<aenv_volume_core::catalog::CatalogError> for RepositoryError {
+    fn from(error: aenv_volume_core::catalog::CatalogError) -> Self {
+        use aenv_volume_core::catalog::CatalogError as E;
+        match error {
+            E::InvalidRequest { reason } => Self::InvalidRequest { reason },
+            E::VolumeNotFound { lookup } => Self::VolumeNotFound { lookup },
+            E::VolumeNameConflict { name } => Self::VolumeNameConflict { name },
+            E::Unsupported { feature } => Self::Unsupported { feature },
+            E::Backend { message, source } => Self::Backend { message, source },
+        }
+    }
+}

@@ -2,15 +2,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tokio::io::AsyncBufReadExt;
 use tokio::net::UnixStream;
 use tokio::time::{Duration, Instant};
 use warm_pool::PoolConfig;
 
 use crate::protocol::{
-    recv_message, send_message, AccessMode, DaemonRequest, DaemonResponse, PackRecordingState,
-    RestackSnapshotStats,
+    AccessMode, DaemonRequest, DaemonResponse, PackRecordingState, RestackSnapshotStats,
+    recv_message, send_message,
 };
 use overlaybd::config::UpperMode;
 
@@ -920,5 +920,97 @@ mod tests {
         let result = client.shutdown().await;
         assert!(result.is_ok());
         assert!(client.inner.shutting_down.load(Ordering::Acquire));
+    }
+}
+
+/// Connects to a supervised managed daemon without owning its process lifetime.
+/// Dropping/restarting the host must never kill an active CSI device session.
+#[derive(Clone, Debug)]
+pub struct ManagedDaemonClient {
+    socket: PathBuf,
+    timeout: Duration,
+}
+impl ManagedDaemonClient {
+    pub async fn capabilities(&self) -> Result<Vec<String>> {
+        tokio::time::timeout(self.timeout, async {
+            let mut stream = UnixStream::connect(&self.socket).await?;
+            send_message(&mut stream, &DaemonRequest::ManagedCapabilities).await?;
+            match recv_message::<DaemonResponse>(&mut stream)
+                .await?
+                .context("daemon capabilities missing")?
+            {
+                DaemonResponse::ManagedCapabilities {
+                    protocol,
+                    capabilities,
+                } if protocol == "agentenv.managed-storage.v1" => Ok(capabilities),
+                _ => anyhow::bail!("incompatible managed storage daemon; no capability downgrade"),
+            }
+        })
+        .await
+        .context("managed daemon capability negotiation timed out")?
+    }
+    pub async fn expand(
+        &self,
+        plan: crate::protocol::ManagedExpansionPlan,
+    ) -> Result<crate::protocol::ManagedExpansionView> {
+        tokio::time::timeout(self.timeout, async {
+            let mut stream = UnixStream::connect(&self.socket)
+                .await
+                .context("connect maintenance daemon")?;
+            send_message(&mut stream, &DaemonRequest::ExpandManagedVolume { plan }).await?;
+            match recv_message::<DaemonResponse>(&mut stream)
+                .await?
+                .context("maintenance daemon closed without receipt")?
+            {
+                DaemonResponse::ManagedExpansion { view } => Ok(view),
+                DaemonResponse::Error { message }
+                | DaemonResponse::InvalidRequest { message }
+                | DaemonResponse::TerminalError { message } => Err(anyhow::anyhow!(message)),
+                other => Err(anyhow::anyhow!(
+                    "unexpected maintenance response: {other:?}"
+                )),
+            }
+        })
+        .await
+        .context("maintenance daemon reply timed out; inspect same operation")?
+    }
+    pub fn connect(socket: PathBuf, timeout: Duration) -> Result<Self> {
+        anyhow::ensure!(
+            socket.is_absolute() && !timeout.is_zero(),
+            "absolute managed daemon socket and positive timeout required"
+        );
+        Ok(Self { socket, timeout })
+    }
+    pub async fn execute(
+        &self,
+        plan: crate::protocol::ManagedDevicePlan,
+        action: crate::protocol::ManagedDeviceAction,
+    ) -> Result<DaemonResponse> {
+        tokio::time::timeout(self.timeout, async {
+            let mut stream = UnixStream::connect(&self.socket)
+                .await
+                .context("connect managed storage daemon")?;
+            send_message(&mut stream, &DaemonRequest::ManagedDevice { plan, action }).await?;
+            let response = recv_message::<DaemonResponse>(&mut stream)
+                .await?
+                .context("managed daemon closed without a receipt")?;
+            match response {
+                DaemonResponse::ManagedDevice { .. } | DaemonResponse::ManagedCapture { .. } => {
+                    Ok(response)
+                }
+                DaemonResponse::TerminalError { message } => {
+                    Err(RestackSnapshotTerminalFailure::new(message).into())
+                }
+                DaemonResponse::InvalidRequest { message } => {
+                    Err(InvalidRequestError::new(message).into())
+                }
+                DaemonResponse::Error { message } => Err(anyhow::anyhow!(message)),
+                other => Err(anyhow::anyhow!(
+                    "unexpected managed daemon response: {other:?}"
+                )),
+            }
+        })
+        .await
+        .context("managed daemon result unknown; inspect original session")?
     }
 }

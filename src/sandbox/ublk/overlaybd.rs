@@ -1,15 +1,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(test)]
 use overlaybd::backend::local::LocalFile;
 use overlaybd::config::{LayerConfig, UpperMode};
-use overlaybd::index_file::{merge_files_ro, CommitArgs};
+use overlaybd::index_file::CommitArgs;
 use overlaybd::virtual_file::VirtualFile;
+#[cfg(test)]
 use overlaybd::zfile::{CompressArgs, CompressOptions, ZFileCompactWriter};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
-use uuid::Uuid;
 
 use super::device::UblkDevice;
 use crate::cfg::{OverlaybdCompressionAlgorithm, SnapshotPublishCompressionConfig};
@@ -45,31 +45,30 @@ impl OverlaybdCompactOutput {
     }
 }
 
+impl From<OverlaybdCompactOutput> for aenv_volume_core::compact::CompactOutput {
+    fn from(mode: OverlaybdCompactOutput) -> Self {
+        match mode {
+            OverlaybdCompactOutput::Raw => Self::Raw,
+            OverlaybdCompactOutput::ZFile { algorithm, workers } => Self::ZFile {
+                algorithm: match algorithm {
+                    OverlaybdCompressionAlgorithm::Lz4 => {
+                        aenv_volume_core::compact::CompressionAlgorithm::Lz4
+                    }
+                    OverlaybdCompressionAlgorithm::Zstd => {
+                        aenv_volume_core::compact::CompressionAlgorithm::Zstd
+                    }
+                },
+                workers,
+            },
+        }
+    }
+}
 pub(crate) async fn create_commit_args(
     output: Arc<dyn VirtualFile>,
     mode: OverlaybdCompactOutput,
     concurrency: usize,
 ) -> Result<CommitArgs> {
-    let mut args = match mode {
-        OverlaybdCompactOutput::Raw => CommitArgs::new(output),
-        OverlaybdCompactOutput::ZFile { algorithm, workers } => {
-            let algorithm = match algorithm {
-                OverlaybdCompressionAlgorithm::Lz4 => CompressOptions::LZ4,
-                OverlaybdCompressionAlgorithm::Zstd => CompressOptions::ZSTD,
-            };
-            let mut compress_args = CompressArgs::new(CompressOptions::new(
-                algorithm,
-                CompressOptions::DEFAULT_BLOCK_SIZE,
-                0,
-            ));
-            compress_args.workers = workers.max(1);
-            CommitArgs::from_writer(Arc::new(
-                ZFileCompactWriter::new(output, &compress_args).await?,
-            ))
-        }
-    };
-    args.concurrency = concurrency;
-    Ok(args)
+    aenv_volume_core::compact::create_commit_args(output, mode.into(), concurrency).await
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -103,59 +102,7 @@ pub(crate) async fn compact_layers(
     output_path: &Path,
     mode: OverlaybdCompactOutput,
 ) -> Result<Option<PathBuf>> {
-    if layers.is_empty() {
-        return Ok(None);
-    }
-
-    let mut src_files: Vec<Arc<dyn VirtualFile>> = Vec::with_capacity(layers.len());
-    for layer in layers {
-        let path = Path::new(&layer.file);
-        let local: Arc<dyn VirtualFile> = Arc::new(
-            LocalFile::open_ro(path)
-                .with_context(|| format!("open layer for compaction: {}", path.display()))?,
-        );
-        let tar_adapted = overlaybd::backend::tar::new_tar_file_adaptor(local)
-            .await
-            .with_context(|| format!("adapt layer as tar file: {}", path.display()))?;
-        let display = path.display().to_string();
-        let switched =
-            overlaybd::backend::switch::new_switch_file(tar_adapted, true, Some(&display))
-                .await
-                .with_context(|| format!("open layer via switch file: {}", path.display()))?;
-        src_files.push(switched);
-    }
-
-    let lower_tmp = output_path.with_extension(format!("commit.{}.tmp", Uuid::now_v7()));
-    let build_result: Result<()> = async {
-        let output_file: Arc<dyn VirtualFile> =
-            Arc::new(LocalFile::new(&lower_tmp).context("create compacted layer output file")?);
-        let commit_args = create_commit_args(output_file, mode, 32).await?;
-        merge_files_ro(&src_files, commit_args)
-            .await
-            .context("merge layers")?;
-        tokio::fs::rename(&lower_tmp, output_path)
-            .await
-            .with_context(|| {
-                format!(
-                    "publish compacted layer to {} failed",
-                    output_path.display()
-                )
-            })?;
-        Ok(())
-    }
-    .await;
-
-    if build_result.is_err() {
-        let _ = tokio::fs::remove_file(&lower_tmp).await;
-    }
-    build_result?;
-
-    debug!(
-        output = %output_path.display(),
-        input_layers = layers.len(),
-        "compacted overlaybd layers"
-    );
-    Ok(Some(output_path.to_path_buf()))
+    aenv_volume_core::compact::compact_layers(layers, output_path, mode.into()).await
 }
 
 #[cfg(test)]

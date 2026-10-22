@@ -66,6 +66,11 @@ func main() {
 			registry.Set(nodes, nil)
 		}
 
+		plugin, closePlugin, err := initializeStorage(sigCtx, registry)
+		if err != nil {
+			logger.Fatal("initialize storage plugin failed", zap.Error(err))
+		}
+		defer closePlugin()
 		svc := scheduler.NewService(
 			logger,
 			registry,
@@ -76,6 +81,7 @@ func main() {
 				cfg.Scheduler.ArtifactLookupNodeLimit,
 			)),
 			scheduler.WithNodeResourceLimit(cfg.Scheduler.NodeResourceLimit),
+			scheduler.WithControlPlugin(plugin),
 		)
 		go svc.RunObservedNodesMetrics(sigCtx, 15*time.Second)
 		schedulerv1.RegisterSchedulerServer(g, svc)

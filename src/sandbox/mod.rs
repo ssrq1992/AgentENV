@@ -10,6 +10,7 @@ mod metrics;
 pub(crate) mod mock;
 mod network;
 mod process;
+pub(crate) mod storage;
 mod ublk;
 
 use std::{collections::HashMap, path::PathBuf};
@@ -23,9 +24,10 @@ use crate::types::{ImageConfigs, SandboxId};
 pub use ::envd::process::Signal;
 pub use access::{EnvdAccessToken, SandboxAccessTokenGenerator};
 pub use backend::{
-    CapturedSandboxSnapshot, PausedSandboxState, RuntimeArtifactSet, SandboxBackend,
-    SandboxBackendFactory, SandboxCaptureError, SandboxCaptureResult, SandboxExecutor,
-    SandboxForkResult, SandboxForkSpec, SandboxRuntimeInfo,
+    CapturedSandboxSnapshot, ForkRuntimeMetadata, PausedSandboxState, PreparedForkChild,
+    RuntimeArtifactSet, SandboxBackend, SandboxBackendFactory, SandboxCaptureError,
+    SandboxCaptureResult, SandboxExecutor, SandboxForkPreparer, SandboxForkResult, SandboxForkSpec,
+    SandboxRuntimeInfo,
 };
 pub use extra_drive::{
     normalize_mount_path, normalize_mount_path_for_drive, validate_drive_id, validate_mount_path,
@@ -45,7 +47,7 @@ pub use network::{
     ALL_INTERNET_TRAFFIC_CIDR,
 };
 pub use process::{Executor, ProcessHandle, ProcessOpts, ProcessOutput};
-pub(crate) use ublk::{compact_layers, OverlaybdCompactOutput};
+pub(crate) use ublk::OverlaybdCompactOutput;
 pub use ublk::{OverlaybdConfig, UblkBackend, UblkConfig, UblkDaemonConfig, UblkDeviceManager};
 
 #[derive(Clone, Debug)]
@@ -63,6 +65,7 @@ pub struct FreshSandboxBuildSpec {
 /// into backend construction.
 #[derive(Clone, Debug, Default)]
 pub struct SandboxLaunchConfig {
+    pub storage_context: Option<storage::StorageContext>,
     /// Stable sandbox identity
     pub sandbox_id: SandboxId,
     /// Snapshot/template identity
@@ -98,6 +101,7 @@ impl SandboxLaunchConfig {
             extra_mmds: serde_json::Map::new(),
             extra_drives: Vec::new(),
             extra_drives_in_snapshot: false,
+            storage_context: None,
             custom_extension_params: None,
             envd_access_token: None,
         }

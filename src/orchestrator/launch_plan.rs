@@ -31,6 +31,7 @@ pub(super) struct ResumeLaunchPlan {
     pub timeout: NewTimeout,
     pub resources: SandboxResources,
     pub envd_access_token: Option<EnvdAccessToken>,
+    pub storage_context: Option<crate::sandbox::storage::StorageContext>,
 }
 
 pub(super) enum LaunchPlan {
@@ -86,7 +87,25 @@ impl LaunchPlan {
             timeout,
             resources,
             envd_access_token,
+            storage_context: None,
         }))
+    }
+
+    pub(super) fn with_resume_storage(
+        mut self,
+        context: Option<crate::sandbox::storage::StorageContext>,
+    ) -> Self {
+        if let Self::Resume(plan) = &mut self {
+            plan.storage_context = context;
+        }
+        self
+    }
+
+    pub(super) fn storage_context(&self) -> Option<crate::sandbox::storage::StorageContext> {
+        match self {
+            Self::Create(plan) => plan.launch_config.storage_context.clone(),
+            Self::Resume(plan) => plan.storage_context.clone(),
+        }
     }
 
     pub(super) fn sandbox_id(&self) -> SandboxId {

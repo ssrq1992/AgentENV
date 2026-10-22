@@ -163,6 +163,27 @@ impl SandboxBackendFactory for FirecrackerSandboxFactory {
         )?))
     }
 
+    fn build_from_paused_state_with_storage(
+        &self,
+        sandbox_id: SandboxId,
+        state: &dyn PausedSandboxState,
+        envd_access_token: Option<EnvdAccessToken>,
+        storage_context: Option<crate::sandbox::storage::StorageContext>,
+    ) -> Result<Box<dyn SandboxBackend>> {
+        let paused_state = state
+            .downcast_ref::<FirecrackerPausedState>()
+            .context("The provided PausedSandboxState is not a Firecracker paused state")?;
+        let mut config = paused_state.snapshot_config().clone();
+        config.common.storage_context = storage_context;
+        Ok(Box::new(
+            FirecrackerSandbox::from_snapshot_config_with_override(
+                config,
+                sandbox_id,
+                envd_access_token,
+            )?,
+        ))
+    }
+
     fn build_from_paused_state(
         &self,
         sandbox_id: SandboxId,

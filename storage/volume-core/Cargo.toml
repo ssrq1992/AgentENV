@@ -1,0 +1,35 @@
+[package]
+name = "aenv-volume-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+metadata = ["dep:sha2", "dep:uuid", "dep:tokio"]
+content = ["metadata", "dep:overlaybd", "dep:tokio", "dep:tracing", "dep:base64", "dep:metrics", "dep:bytes", "dep:futures", "dep:url", "dep:opendal", "dep:object-store-operator"]
+
+[dependencies]
+base64 = { version = "0.22", optional = true }
+tracing = { version = "0.1", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"
+sha2 = { version = "0.10", features = ["asm"], optional = true }
+uuid = { version = "1", features = ["v7"], optional = true }
+nix = { version = "0.31", features = ["fs"] }
+tempfile = "3"
+overlaybd = { path = "../overlaybd", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+
+metrics = { version = "0.24", optional = true }
+bytes = { version = "1", optional = true }
+futures = { version = "0.3", optional = true }
+url = { version = "2.5", optional = true }
+opendal = { version = "0.55.0", features = ["services-s3"], optional = true }
+object-store-operator = { path = "../../crates/object-store-operator", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

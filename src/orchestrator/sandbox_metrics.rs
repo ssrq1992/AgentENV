@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use tokio::sync::broadcast;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, warn};

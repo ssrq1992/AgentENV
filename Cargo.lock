@@ -72,6 +72,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aenv-volume-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "metrics",
+ "nix 0.31.2",
+ "object-store-operator",
+ "opendal",
+ "overlaybd",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "aes"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -100,7 +125,9 @@ dependencies = [
 name = "agentenv"
 version = "0.2.3"
 dependencies = [
+ "aenv-volume-core",
  "agentenv-observability",
+ "agentenv-storage-plugin",
  "agentenv_http_server",
  "anyhow",
  "async-trait",
@@ -219,6 +246,23 @@ dependencies = [
  "axum",
  "metrics-exporter-prometheus",
  "tokio",
+]
+
+[[package]]
+name = "agentenv-storage-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "reqwest 0.13.3",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -8278,6 +8322,7 @@ dependencies = [
 name = "uvm-ublk-daemon"
 version = "0.1.0"
 dependencies = [
+ "aenv-volume-core",
  "agentenv-observability",
  "anyhow",
  "clap",
@@ -8296,6 +8341,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-log 0.2.0",
+ "uuid",
  "uvm-ublk",
  "warm-pool",
 ]

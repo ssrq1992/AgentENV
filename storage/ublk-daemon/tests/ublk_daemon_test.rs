@@ -14,7 +14,7 @@ use tokio::net::UnixListener;
 use tokio::sync::oneshot;
 
 use uvm_ublk_daemon::protocol::{
-    recv_message, send_message, DaemonRequest, DaemonResponse, PackRecordingState,
+    DaemonRequest, DaemonResponse, PackRecordingState, recv_message, send_message,
 };
 use uvm_ublk_daemon::{
     CreateOverlaybdRuntimeDeviceRequest, InvalidRequestError, RestackSnapshotTerminalFailure,
@@ -699,6 +699,11 @@ mod client_tests {
             // Capture the request for later inspection.
             captured_for_server.lock().unwrap().push(format!("{req:?}"));
             match req {
+                DaemonRequest::ManagedCapabilities
+                | DaemonRequest::ManagedDevice { .. }
+                | DaemonRequest::ExpandManagedVolume { .. } => DaemonResponse::Error {
+                    message: "legacy dispatch fixture does not implement managed devices".into(),
+                },
                 DaemonRequest::CreateOverlaybd { .. } => DaemonResponse::DeviceCreated {
                     dev_id: 10,
                     device_path: PathBuf::from("/dev/ublkb10"),

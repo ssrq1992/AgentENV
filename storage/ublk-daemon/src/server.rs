@@ -1,37 +1,41 @@
+mod maintenance;
+mod managed;
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
-use dashmap::mapref::entry::Entry;
+use anyhow::{Context, Result, bail};
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
+use overlaybd::RestackSnapshotTerminalFailure;
 use overlaybd::config::{ImageConfig, UpperConfig, UpperMode};
 use overlaybd::helper::prepare_runtime_upper;
 use overlaybd::image_file::ImageFile;
 use overlaybd::image_service::ImageService;
-use overlaybd::RestackSnapshotTerminalFailure;
 use tokio::net::UnixListener;
 use tokio::sync::{Mutex, Notify, RwLock};
 use warm_pool::{PoolConfig, PoolMaintenanceAction, WarmPool};
 
 use storage_util::io_ring::IoRingHandle;
 use uvm_ublk::{
-    delete_dev, tmp_pack_path, ublk_caps, wait_for_ublk_dev, OverlaybdTarget, StartupPackRecorder,
-    UVMUblkCtrlBuilder, UVMUblkDev, UVMUblkDevBuilder, UVMUblkTarget,
+    OverlaybdTarget, StartupPackRecorder, UVMUblkCtrlBuilder, UVMUblkDev, UVMUblkDevBuilder,
+    UVMUblkTarget, delete_dev, tmp_pack_path, ublk_caps, wait_for_ublk_dev,
 };
 
 use crate::protocol::{
-    recv_message, send_message, AccessMode, DaemonRequest, DaemonResponse, PackRecordingState,
-    ResizeToolSpec,
+    AccessMode, DaemonRequest, DaemonResponse, PackRecordingState, ResizeToolSpec, recv_message,
+    send_message,
 };
 use crate::runtime;
 
 // ── Managed device wrapper ──────────────────────────────────────────────────
 
 struct ManagedDevice {
+    managed_session: Option<String>,
+    managed_view: Option<crate::protocol::ManagedDeviceView>,
     dev: UVMUblkDev<OverlaybdTarget>,
     image: Arc<ImageFile>,
 }
@@ -267,6 +271,8 @@ impl PoolState {
 
 pub struct UblkDaemonServer {
     socket_path: PathBuf,
+    managed_sessions: Option<Arc<managed::ManagedSessions>>,
+    draining: Arc<AtomicBool>,
     ctrl_ring: IoRingHandle<io_uring::squeue::Entry128>,
     image_service_cache: Arc<ImageServiceCache>,
     default_image_service: ImageService,
@@ -324,6 +330,8 @@ impl UblkDaemonServer {
         }
         Self {
             socket_path,
+            managed_sessions: None,
+            draining: Arc::new(AtomicBool::new(false)),
             ctrl_ring,
             image_service_cache: Arc::new(cache),
             default_image_service,
@@ -350,6 +358,21 @@ impl UblkDaemonServer {
 
     /// Enable warm pooling with the given configuration.
     /// Must be called before `run()`.
+    /// Enable a separate, persistent CSI device namespace. Legacy daemons do
+    /// not accept managed requests and retain their original parent lifetime.
+    pub fn enable_managed_sessions(&mut self, root: PathBuf) -> Result<()> {
+        anyhow::ensure!(
+            self.pool_state.is_none(),
+            "managed sessions cannot share a legacy warm pool"
+        );
+        managed::private_directory(
+            self.socket_path
+                .parent()
+                .context("managed socket parent missing")?,
+        )?;
+        self.managed_sessions = Some(Arc::new(managed::ManagedSessions::open(root)?));
+        Ok(())
+    }
     pub fn enable_pool(&mut self, config: PoolConfig, features: u64) {
         self.pool_state = Some(Arc::new(PoolState::new(
             config,
@@ -396,6 +419,10 @@ impl UblkDaemonServer {
 
         let listener = UnixListener::bind(&self.socket_path)
             .with_context(|| format!("bind daemon socket: {}", self.socket_path.display()))?;
+        if self.managed_sessions.is_some() {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))?;
+        }
         tracing::info!(
             path = %self.socket_path.display(),
             resize_global_config = %self.resize_global_config.display(),
@@ -422,9 +449,13 @@ impl UblkDaemonServer {
                     let pack_recordings = Arc::clone(&self.pack_recordings);
                     let startup_pack_handles = Arc::clone(&self.startup_pack_handles);
                     let shutdown = Arc::clone(&self.shutdown);
+                    let managed_sessions=self.managed_sessions.clone();
+                    let draining=Arc::clone(&self.draining);
                     tokio::spawn(async move {
                         if let Err(err) = handle_connection(
                             stream,
+                            managed_sessions,
+                            draining,
                             devices,
                             ctrl_ring,
                             image_service_cache,
@@ -458,7 +489,16 @@ impl UblkDaemonServer {
 
     /// Request the daemon to shut down.
     pub fn request_shutdown(&self) {
-        self.shutdown.notify_one();
+        self.draining.store(true, Ordering::SeqCst);
+        if self.managed_sessions.is_none()
+            || (self.devices.is_empty()
+                && self
+                    .managed_sessions
+                    .as_ref()
+                    .is_some_and(|state| state.idle()))
+        {
+            self.shutdown.notify_one();
+        }
     }
 
     async fn stop_all_devices(&self) {
@@ -522,6 +562,8 @@ impl UblkDaemonServer {
 #[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     mut stream: tokio::net::UnixStream,
+    managed_sessions: Option<Arc<managed::ManagedSessions>>,
+    draining: Arc<AtomicBool>,
     devices: Arc<DashMap<u32, ManagedDevice>>,
     ctrl_ring: IoRingHandle<io_uring::squeue::Entry128>,
     image_service_cache: Arc<ImageServiceCache>,
@@ -537,7 +579,104 @@ async fn handle_connection(
         return Ok(());
     };
 
+    if managed_sessions.is_some()
+        && !matches!(
+            &request,
+            DaemonRequest::ManagedDevice { .. }
+                | DaemonRequest::ManagedCapabilities
+                | DaemonRequest::ExpandManagedVolume { .. }
+                | DaemonRequest::GetFeatures
+                | DaemonRequest::Shutdown
+        )
+    {
+        send_message(
+            &mut stream,
+            &DaemonResponse::InvalidRequest {
+                message: "legacy device commands cannot mutate managed CSI sessions".into(),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
     let response = match request {
+        DaemonRequest::ManagedCapabilities => {
+            if managed_sessions.is_none() {
+                Err(anyhow::anyhow!(
+                    "managed protocol requires a dedicated daemon"
+                ))
+            } else {
+                use std::os::unix::fs::PermissionsExt;
+                let mut capabilities = vec![
+                    "device-session-v1".into(),
+                    "layer-capture-v1".into(),
+                    "head-publication-v1".into(),
+                    "durable-restack-v1".into(),
+                ];
+                if resize_tool.as_ref().is_some_and(|tool| {
+                    std::fs::metadata(&tool.binary)
+                        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                }) {
+                    capabilities.push("offline-expansion-v1".into());
+                }
+                Ok(DaemonResponse::ManagedCapabilities {
+                    protocol: "agentenv.managed-storage.v1".into(),
+                    capabilities,
+                })
+            }
+        }
+        DaemonRequest::ExpandManagedVolume { plan } => {
+            if let Some(state) = managed_sessions.as_ref() {
+                let _activity = state.enter();
+                if draining.load(Ordering::SeqCst) {
+                    Err(anyhow::anyhow!("managed daemon is draining"))
+                } else {
+                    maintenance::expand(
+                        state,
+                        plan,
+                        &devices,
+                        ctrl_ring,
+                        &image_service_cache,
+                        resize_tool.as_ref(),
+                        &resize_global_config,
+                        resize_permit,
+                        &pack_recordings,
+                    )
+                    .await
+                }
+            } else {
+                Err(anyhow::anyhow!(
+                    "maintenance requires a dedicated managed daemon"
+                ))
+            }
+        }
+        DaemonRequest::ManagedDevice { plan, action } => {
+            if let Some(state) = managed_sessions.as_ref() {
+                let _activity = state.enter();
+                if draining.load(Ordering::SeqCst)
+                    && matches!(&action, crate::protocol::ManagedDeviceAction::Prepare)
+                {
+                    Err(anyhow::anyhow!("managed daemon is draining"))
+                } else {
+                    managed::handle(
+                        state,
+                        plan,
+                        action,
+                        &devices,
+                        ctrl_ring,
+                        &image_service_cache,
+                        resize_tool.as_ref(),
+                        &resize_global_config,
+                        resize_permit,
+                        &pack_recordings,
+                    )
+                    .await
+                }
+            } else {
+                Err(anyhow::anyhow!(
+                    "managed sessions require a dedicated daemon"
+                ))
+            }
+        }
         DaemonRequest::CreateOverlaybd {
             image_config,
             global_config,
@@ -573,6 +712,8 @@ async fn handle_connection(
                 resize_global_config: &resize_global_config,
                 resize_permit: Arc::clone(&resize_permit),
                 allow_shrink,
+                retain_on_error: false,
+                managed_session: None,
             };
             handle_create_overlaybd_runtime_device(
                 request,
@@ -676,11 +817,20 @@ async fn handle_connection(
             new_sectors,
         } => handle_update_size(&pool_state, dev_id, new_sectors).await,
         DaemonRequest::Shutdown => {
-            shutdown.notify_one();
+            draining.store(true, Ordering::SeqCst);
+            if managed_sessions.is_none()
+                || (devices.is_empty()
+                    && managed_sessions.as_ref().is_some_and(|state| state.idle()))
+            {
+                shutdown.notify_one();
+            }
             Ok(DaemonResponse::Ok)
         }
     };
 
+    if managed_sessions.is_some() && draining.load(Ordering::SeqCst) && devices.is_empty() {
+        shutdown.notify_one();
+    }
     let response = match response {
         Ok(resp) => resp,
         Err(err) => {
@@ -721,6 +871,8 @@ struct OverlaybdRuntimeDeviceRequest<'a> {
     resize_global_config: &'a Path,
     resize_permit: Arc<Mutex<()>>,
     allow_shrink: bool,
+    retain_on_error: bool,
+    managed_session: Option<&'a str>,
 }
 
 async fn handle_create_overlaybd_runtime_device(
@@ -730,6 +882,10 @@ async fn handle_create_overlaybd_runtime_device(
     image_service_cache: &ImageServiceCache,
     pool_state: &Option<Arc<PoolState>>,
 ) -> Result<DaemonResponse> {
+    anyhow::ensure!(
+        request.managed_session.is_none() || pool_state.is_none(),
+        "managed devices cannot use the legacy warm pool"
+    );
     let runtime =
         match runtime::materialize_overlaybd_runtime(runtime::MaterializeOverlaybdRuntimeRequest {
             image_service_cache,
@@ -744,6 +900,7 @@ async fn handle_create_overlaybd_runtime_device(
             resize_global_config: request.resize_global_config,
             resize_permit: request.resize_permit,
             allow_shrink: request.allow_shrink,
+            retain_on_error: request.retain_on_error,
         })
         .await
         {
@@ -784,6 +941,7 @@ async fn handle_create_overlaybd_runtime_device(
             image_service_cache,
             &runtime.runtime_image_config_path,
             request.global_config,
+            request.managed_session,
         )
         .await
     };
@@ -795,7 +953,9 @@ async fn handle_create_overlaybd_runtime_device(
             // ImageFile/target locals have been dropped before we remove the
             // daemon-owned runtime directory.
             let runtime_image_config_path = runtime.runtime_image_config_path.clone();
-            runtime.rollback();
+            if !request.retain_on_error {
+                runtime.rollback();
+            }
             return Err(err).with_context(|| {
                 format!(
                     "create overlaybd runtime device from {}",
@@ -832,6 +992,7 @@ async fn handle_create_raw_overlaybd(
         image_service_cache,
         image_config,
         global_config,
+        None,
     )
     .await?;
 
@@ -847,6 +1008,7 @@ async fn create_overlaybd_device(
     image_service_cache: &ImageServiceCache,
     image_config: &Path,
     global_config: &Path,
+    managed_session: Option<&str>,
 ) -> Result<(u32, PathBuf)> {
     let image_service = image_service_cache
         .get_or_create(global_config)
@@ -894,6 +1056,8 @@ async fn create_overlaybd_device(
     devices.insert(
         dev_id,
         ManagedDevice {
+            managed_session: managed_session.map(str::to_owned),
+            managed_view: None,
             dev,
             image: Arc::clone(&image),
         },
@@ -2082,9 +2246,11 @@ mod tests {
 
         // Fail before allocating any ublk device, and verify repeated failures
         // leave time between attempts without permanently stopping retries.
-        assert!(refill_idle_pool(&pool, ctrl_ring.clone(), 4096)
-            .await
-            .is_err());
+        assert!(
+            refill_idle_pool(&pool, ctrl_ring.clone(), 4096)
+                .await
+                .is_err()
+        );
         for _ in 0..2 {
             let started = tokio::time::Instant::now();
             tokio::time::timeout(
@@ -2120,9 +2286,11 @@ mod tests {
         assert_eq!(image.num_lbas(), virtual_size / 512);
         assert!(config_path.starts_with(&placeholder_dir));
         assert!(config_path.exists());
-        assert!(placeholder_dir
-            .join(format!("{virtual_size}.data"))
-            .exists());
+        assert!(
+            placeholder_dir
+                .join(format!("{virtual_size}.data"))
+                .exists()
+        );
 
         // No lowers -> an idle placeholder device pins no hard commit, so GC is
         // not blocked by it.
