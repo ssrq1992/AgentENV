@@ -36,6 +36,48 @@ pub(super) struct ManagedSessions {
     pub(super) instance: String,
     _lock: Flock<File>,
 }
+
+// A replaced pod's previous daemon can keep daemon.lock until its termination
+// grace period expires. The kernel releases the flock when that process
+// exits, so wait for it instead of failing the new daemon's startup.
+fn daemon_lock_wait() -> std::time::Duration {
+    std::env::var("AENV_DAEMON_LOCK_WAIT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|secs| *secs > 0 && *secs <= 3600)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(120))
+}
+
+fn lock_exclusive_with_wait(file: File) -> Result<Flock<File>> {
+    let wait = daemon_lock_wait();
+    let deadline = std::time::Instant::now() + wait;
+    let mut file = file;
+    let mut warned = false;
+    loop {
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => return Ok(lock),
+            Err((held, nix::errno::Errno::EAGAIN)) => {
+                file = held;
+                if std::time::Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "managed daemon state is still owned by another process after {}s",
+                        wait.as_secs()
+                    );
+                }
+                if !warned {
+                    warned = true;
+                    tracing::warn!(
+                        wait_secs = wait.as_secs(),
+                        "managed daemon state is owned by the previous daemon; waiting for it to exit"
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err((_, e)) => return Err(anyhow::anyhow!("managed daemon lock failed: {e}")),
+        }
+    }
+}
 pub(super) struct ManagedActivity<'a>(&'a ManagedSessions);
 impl Drop for ManagedActivity<'_> {
     fn drop(&mut self) {
@@ -64,8 +106,7 @@ impl ManagedSessions {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(root.join("daemon.lock"))?;
-        let lock = Flock::lock(file, FlockArg::LockExclusiveNonblock)
-            .map_err(|(_, e)| anyhow::anyhow!("managed daemon state is already owned: {e}"))?;
+        let lock = lock_exclusive_with_wait(file)?;
         let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
             .trim()
             .to_owned();

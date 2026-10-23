@@ -346,7 +346,9 @@ fn main() -> Result<()> {
 
         let managed_mode = cli.managed_state_dir.is_some();
         if let Some(root) = cli.managed_state_dir.clone() {
-            server.enable_managed_sessions(root)?;
+            // Acquiring daemon.lock may wait for the previous pod's daemon to
+            // exit (bounded); keep that wait off the async worker threads.
+            tokio::task::block_in_place(|| server.enable_managed_sessions(root))?;
         }
 
         // Open a pidfd for the parent process. When the parent process
