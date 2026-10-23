@@ -354,9 +354,19 @@ fn main() -> Result<()> {
         // gracefully. This monitors process-level lifetime (not thread),
         // which avoids the pitfall of prctl(PR_SET_PDEATHSIG) firing when
         // the specific thread that called fork() exits.
-        let parent_pidfd = pidfd_open(parent_pid).context("open parent pidfd")?;
-        let async_parent_pidfd = AsyncFd::with_interest(parent_pidfd, Interest::READABLE)
-            .context("register parent pidfd with tokio")?;
+        // Managed mode runs this daemon as a dedicated container process;
+        // its parent may live outside the PID namespace (getppid() == 0)
+        // and pidfd_open(0) fails with EINVAL. The parent-exit watchdog is
+        // disabled in managed mode anyway, so skip opening the pidfd.
+        let async_parent_pidfd = if managed_mode {
+            None
+        } else {
+            let parent_pidfd = pidfd_open(parent_pid).context("open parent pidfd")?;
+            Some(
+                AsyncFd::with_interest(parent_pidfd, Interest::READABLE)
+                    .context("register parent pidfd with tokio")?,
+            )
+        };
 
         let server = Arc::new(server);
 
@@ -372,17 +382,32 @@ fn main() -> Result<()> {
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
                         .expect("install SIGINT handler");
 
-                tokio::select! {
-                    _ = sigterm.recv() => {
-                        tracing::info!("received SIGTERM");
+                if managed_mode {
+                    // No parent process to watch: this daemon owns its
+                    // lifecycle (dedicated container process).
+                    tokio::select! {
+                        _ = sigterm.recv() => {
+                            tracing::info!("received SIGTERM");
+                        }
+                        _ = sigint.recv() => {
+                            tracing::info!("received SIGINT");
+                        }
                     }
-                    _ = sigint.recv() => {
-                        tracing::info!("received SIGINT");
-                    }
-                    result = async_parent_pidfd.readable(), if !managed_mode => {
-                        match result {
-                            Ok(_guard) => tracing::info!("parent process exited, shutting down"),
-                            Err(err) => tracing::warn!(?err, "parent pidfd error, shutting down"),
+                } else {
+                    let mut parent_pidfd = async_parent_pidfd
+                        .expect("parent pidfd required in unmanaged mode");
+                    tokio::select! {
+                        _ = sigterm.recv() => {
+                            tracing::info!("received SIGTERM");
+                        }
+                        _ = sigint.recv() => {
+                            tracing::info!("received SIGINT");
+                        }
+                        result = parent_pidfd.readable() => {
+                            match result {
+                                Ok(_guard) => tracing::info!("parent process exited, shutting down"),
+                                Err(err) => tracing::warn!(?err, "parent pidfd error, shutting down"),
+                            }
                         }
                     }
                 }
